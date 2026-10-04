@@ -56,6 +56,7 @@ DEFAULT_CONFIG = {
     "post_to_discord": True,
     "window_size": "",  # "WxH" in screen pixels, remembered between runs
     "window_zoomed": False,
+    "recent_columns": {},  # Recent picks column widths in screen pixels, by column id
 }
 
 
@@ -596,10 +597,13 @@ class App:
         recent = ttk.LabelFrame(frm, text="Recent picks", padding=px(6))
         recent.pack(fill="both", expand=True, pady=(px(8), 0))
         self.tree = ttk.Treeview(recent, columns=("date", "artist", "album", "added"), show="headings", height=8)
+        saved_widths = self.config.get("recent_columns") or {}
         for col, label, width in (("date", "Selected On", 130), ("artist", "Artist", 170),
                                   ("album", "Album", 230), ("added", "Date Added", 110)):
             self.tree.heading(col, text=label)
-            self.tree.column(col, width=px(width), anchor="w")
+            saved = saved_widths.get(col)
+            width = saved if isinstance(saved, int) and saved >= px(30) else px(width)
+            self.tree.column(col, width=width, anchor="w")
         self.tree.tag_configure("odd", background="#f0f0f0")
         scroll = ttk.Scrollbar(recent, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll.set)
@@ -629,6 +633,7 @@ class App:
         self.config["window_zoomed"] = zoomed
         if not zoomed:  # a maximized size isn't useful to restore; keep the last normal size
             self.config["window_size"] = f"{self.root.winfo_width()}x{self.root.winfo_height()}"
+        self.config["recent_columns"] = {col: self.tree.column(col, "width") for col in self.tree["columns"]}
         try:
             save_config(self.config)
         except OSError:
