@@ -4,7 +4,7 @@ Album Picker GUI - Windows front end for albumfinder.py + pick_album.py.
   * Refresh Library: scans <library>/<Artist>/<Album>/, offers to add albums
     that are not already queued and have not been picked before, and offers to
     remove queued albums whose folders have been deleted.
-  * Pick next album: pops a random album from the queue CSV, logs it to the
+  * Random Pick!: pops a random album from the queue CSV, logs it to the
     history file, and posts it to Discord.
 
 The queue CSV keeps the same format albumfinder.py writes, so pick_album.py
@@ -36,7 +36,7 @@ APP_DIR = (
 CONFIG_PATH = APP_DIR / "album_picker_config.json"
 QUEUE_HEADER = ["First_Level_Directory", "Second_Level_Directory", "Created_Date"]
 HISTORY_HEADER = ["Artist", "Album", "Created_Date", "Picked_Date", "Status"]
-DATE_FMT = "%Y-%m-%d %H:%M:%S"
+DATE_FMT = "%Y-%m-%d %H:%M:%S"  # stored in the CSVs; pick_album.py parses this exact format
 MAX_RETRIES = 5
 RECENT_COUNT = 25
 
@@ -54,6 +54,8 @@ DEFAULT_CONFIG = {
     "csv_path": str(APP_DIR / "albums.csv"),
     "webhook_url": "",
     "post_to_discord": True,
+    "window_size": "",  # "WxH" in screen pixels, remembered between runs
+    "window_zoomed": False,
 }
 
 
@@ -157,6 +159,11 @@ def scan_library(root: Path) -> tuple[list[list[str]], set[str]]:
 
 
 # --- Pick helpers (from pick_album.py) ---
+
+def short_time(date_str: str) -> str:
+    """Display form of a stored timestamp: drop the seconds (YYYY-MM-DD HH:MM)."""
+    return date_str[:16]
+
 
 def time_since(date_str: str) -> str:
     added = datetime.strptime(date_str, DATE_FMT)
@@ -542,8 +549,9 @@ class App:
         self.root = root
         self.config = load_config()
         root.title("Album Picker")
-        root.geometry(f"{px(700)}x{px(580)}")
         root.minsize(px(480), px(480))
+        self.restore_window_size()
+        root.protocol("WM_DELETE_WINDOW", self.on_close)
 
         # Status bar is packed first so the expanding main frame can't squeeze it out.
         self.status_var = tk.StringVar(value="Ready.")
@@ -557,7 +565,7 @@ class App:
         card = ttk.LabelFrame(frm, text="Up next", padding=px(12))
         card.pack(fill="x")
         self.artist_var = tk.StringVar(value="—")
-        self.album_var = tk.StringVar(value="Press “Pick next album” to choose")
+        self.album_var = tk.StringVar(value="Press “Random Pick!” to choose")
         self.added_var = tk.StringVar(value="")
         # Cover art, flush right; empty (zero-size) when the album has none.
         self.cover_label = ttk.Label(card)
@@ -573,7 +581,7 @@ class App:
         # Buttons
         btns = ttk.Frame(frm)
         btns.pack(fill="x", pady=px(12))
-        self.pick_btn = ttk.Button(btns, text="🎲  Pick next album", command=self.pick)
+        self.pick_btn = ttk.Button(btns, text="🎲  Random Pick!", command=self.pick)
         self.pick_btn.pack(side="left", ipadx=px(8), ipady=px(6))
         ttk.Button(btns, text="🔍  Manually pick", command=self.manual_pick).pack(
             side="left", padx=(px(8), 0), ipadx=px(8), ipady=px(6))
@@ -602,6 +610,31 @@ class App:
         if not self.config["library_dir"]:
             root.after(100, self.open_settings)
 
+    # Window size
+    def restore_window_size(self) -> None:
+        default_w, default_h = px(960), px(600)
+        try:
+            w, h = (int(n) for n in self.config.get("window_size", "").split("x"))
+        except ValueError:
+            w, h = default_w, default_h
+        # Never open bigger than the screen (e.g. size saved on a larger monitor).
+        w = min(max(w, px(480)), self.root.winfo_screenwidth())
+        h = min(max(h, px(480)), self.root.winfo_screenheight())
+        self.root.geometry(f"{w}x{h}")
+        if self.config.get("window_zoomed"):
+            self.root.state("zoomed")
+
+    def on_close(self) -> None:
+        zoomed = self.root.state() == "zoomed"
+        self.config["window_zoomed"] = zoomed
+        if not zoomed:  # a maximized size isn't useful to restore; keep the last normal size
+            self.config["window_size"] = f"{self.root.winfo_width()}x{self.root.winfo_height()}"
+        try:
+            save_config(self.config)
+        except OSError:
+            pass
+        self.root.destroy()
+
     # Paths
     @property
     def csv_path(self) -> Path:
@@ -626,7 +659,7 @@ class App:
         played = [h for h in history if len(h) >= 5 and h[4] == "played"]
         recent = reversed(played[-RECENT_COUNT:])
         for i, (artist, album, created, picked, _status) in enumerate(recent):
-            self.tree.insert("", "end", values=(picked, artist, album, created[:10]),
+            self.tree.insert("", "end", values=(short_time(picked), artist, album, created[:10]),
                              tags=("odd",) if i % 2 else ())
 
     # Settings
@@ -634,7 +667,7 @@ class App:
         dlg = SettingsDialog(self.root, self.config)
         self.root.wait_window(dlg)
         if dlg.result:
-            self.config = dlg.result
+            self.config.update(dlg.result)  # keep keys the dialog doesn't edit (e.g. window size)
             save_config(self.config)
             self.refresh()
             self.set_status("Settings saved.")
@@ -692,9 +725,9 @@ class App:
         self.artist_var.set(artist)
         self.album_var.set(album)
         try:
-            self.added_var.set(f"Added {created} ({time_since(created)} ago)")
+            self.added_var.set(f"Added {short_time(created)} ({time_since(created)} ago)")
         except ValueError:
-            self.added_var.set(f"Added {created}")
+            self.added_var.set(f"Added {short_time(created)}")
         self.show_cover(artist, album)
         self.refresh()
 
