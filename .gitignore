@@ -1,0 +1,16 @@
+# Secrets
+.env
+
+# Personal data / local settings
+album_picker_config.json
+albums.csv
+played.csv
+*.tmp
+
+# Python / build output
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
+*.exe
