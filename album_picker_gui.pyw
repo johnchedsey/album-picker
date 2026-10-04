@@ -16,7 +16,9 @@ Usage: double-click album_picker_gui.pyw (or: pythonw album_picker_gui.pyw)
 import calendar
 import csv
 import json
+import os
 import random
+import subprocess
 import sys
 import threading
 import time
@@ -590,8 +592,21 @@ class App:
         self.update_btn.pack(side="left", padx=px(8), ipadx=px(8), ipady=px(6))
         ttk.Button(btns, text="⚙  Settings", command=self.open_settings).pack(side="right", ipady=px(6))
 
+        # Queue count, then the queue CSV's file name as a link: click opens it with the
+        # default program, right-click offers "Open with…" and "Show in folder".
+        queue_line = ttk.Frame(frm)
+        queue_line.pack(anchor="w")
         self.queue_var = tk.StringVar()
-        ttk.Label(frm, textvariable=self.queue_var).pack(anchor="w")
+        ttk.Label(queue_line, textvariable=self.queue_var).pack(side="left")
+        link_font = font.nametofont("TkDefaultFont").copy()
+        link_font.configure(underline=True)
+        self.queue_link = ttk.Label(queue_line, foreground="#0066cc", cursor="hand2", font=link_font)
+        self.queue_link.bind("<Button-1>", lambda e: self.open_queue_file())
+        self.queue_link.bind("<Button-3>", self.show_queue_link_menu)
+        self.queue_link_menu = tk.Menu(root, tearoff=False)
+        self.queue_link_menu.add_command(label="Open", command=self.open_queue_file)
+        self.queue_link_menu.add_command(label="Open with…", command=lambda: self.open_queue_file(choose=True))
+        self.queue_link_menu.add_command(label="Show in folder", command=self.show_queue_file)
 
         # Recent picks
         recent = ttk.LabelFrame(frm, text="Recent picks", padding=px(6))
@@ -649,6 +664,25 @@ class App:
     def history_path(self) -> Path:
         return history_path(self.csv_path)
 
+    def show_queue_link_menu(self, event: tk.Event) -> None:
+        try:
+            self.queue_link_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.queue_link_menu.grab_release()
+
+    def open_queue_file(self, choose: bool = False) -> None:
+        path = self.csv_path
+        try:
+            if choose:  # Windows' "How do you want to open this file?" dialog
+                subprocess.Popen(["rundll32.exe", "shell32.dll,OpenAs_RunDLL", str(path)])
+            else:
+                os.startfile(path)
+        except OSError as e:
+            messagebox.showerror("Open queue", f"Could not open {path}:\n{e}")
+
+    def show_queue_file(self) -> None:
+        subprocess.Popen(["explorer.exe", f"/select,{self.csv_path}"])
+
     def set_status(self, text: str) -> None:
         self.status_var.set(text)
 
@@ -658,8 +692,11 @@ class App:
             history = read_rows(self.history_path)
         except (OSError, csv.Error) as e:
             self.queue_var.set(f"Could not read queue: {e}")
+            self.queue_link.pack_forget()
             return
-        self.queue_var.set(f"{len(queue)} album(s) left in the queue  •  {self.csv_path}")
+        self.queue_var.set(f"{len(queue)} albums left in the queue  •  ")
+        self.queue_link.configure(text=self.csv_path.name)
+        self.queue_link.pack(side="left")
         self.tree.delete(*self.tree.get_children())
         played = [h for h in history if len(h) >= 5 and h[4] == "played"]
         recent = reversed(played[-RECENT_COUNT:])
