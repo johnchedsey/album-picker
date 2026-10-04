@@ -208,6 +208,95 @@ def post_to_discord(webhook_url: str, message: str) -> str:
     return "Failed to post to Discord after maximum retries."
 
 
+# --- Cover art ---
+
+COVER_NAMES = ("cover.jpg", "folder.jpg", "albumart.jpg")
+COVER_SIZE = 140  # longest side, in 96-DPI pixels
+
+_gdiplus = None
+_gdiplus_lock = threading.Lock()
+
+
+def _gdiplus_dll():
+    """Start GDI+ once and return the DLL (Tk 8.6 can't decode JPEG on its own)."""
+    global _gdiplus
+    with _gdiplus_lock:
+        if _gdiplus is None:
+            import ctypes
+
+            class StartupInput(ctypes.Structure):
+                _fields_ = [("version", ctypes.c_uint32), ("callback", ctypes.c_void_p),
+                            ("no_thread", ctypes.c_int), ("no_codecs", ctypes.c_int)]
+
+            dll = ctypes.windll.gdiplus
+            token = ctypes.c_size_t()
+            if dll.GdiplusStartup(ctypes.byref(token), ctypes.byref(StartupInput(1, None, 0, 0)), None):
+                raise OSError("GDI+ failed to start")
+            _gdiplus = dll
+    return _gdiplus
+
+
+def find_cover(album_dir: Path) -> Path | None:
+    for name in COVER_NAMES:
+        path = album_dir / name
+        if path.is_file():
+            return path
+    return None
+
+
+def load_cover_ppm(path: Path, max_side: int) -> bytes:
+    """Decode an image with GDI+, scale it to fit max_side, and return it as PPM data."""
+    import ctypes
+
+    class BitmapData(ctypes.Structure):
+        _fields_ = [("width", ctypes.c_uint), ("height", ctypes.c_uint), ("stride", ctypes.c_int),
+                    ("format", ctypes.c_int), ("scan0", ctypes.c_void_p), ("reserved", ctypes.c_void_p)]
+
+    argb32 = 0x0026200A  # PixelFormat32bppARGB
+    gdi = _gdiplus_dll()
+    src, dst, graphics = ctypes.c_void_p(), ctypes.c_void_p(), ctypes.c_void_p()
+    try:
+        if gdi.GdipCreateBitmapFromFile(ctypes.c_wchar_p(str(path)), ctypes.byref(src)):
+            raise OSError(f"Could not decode {path}")
+        w, h = ctypes.c_uint(), ctypes.c_uint()
+        gdi.GdipGetImageWidth(src, ctypes.byref(w))
+        gdi.GdipGetImageHeight(src, ctypes.byref(h))
+        if not w.value or not h.value:
+            raise OSError(f"Empty image {path}")
+        ratio = max_side / max(w.value, h.value)
+        tw, th = max(1, round(w.value * ratio)), max(1, round(h.value * ratio))
+
+        gdi.GdipCreateBitmapFromScan0(tw, th, 0, argb32, None, ctypes.byref(dst))
+        gdi.GdipGetImageGraphicsContext(dst, ctypes.byref(graphics))
+        gdi.GdipSetInterpolationMode(graphics, 7)  # high-quality bicubic
+        gdi.GdipDrawImageRectI(graphics, src, 0, 0, tw, th)
+
+        rect = (ctypes.c_int * 4)(0, 0, tw, th)
+        data = BitmapData()
+        if gdi.GdipBitmapLockBits(dst, rect, 1, argb32, ctypes.byref(data)):
+            raise OSError(f"Could not read pixels of {path}")
+        try:
+            raw = ctypes.string_at(data.scan0, data.stride * th)
+        finally:
+            gdi.GdipBitmapUnlockBits(dst, ctypes.byref(data))
+    finally:
+        if graphics:
+            gdi.GdipDeleteGraphics(graphics)
+        for image in (dst, src):
+            if image:
+                gdi.GdipDisposeImage(image)
+
+    # BGRA rows (possibly padded) -> packed RGB.
+    rgb = bytearray(tw * th * 3)
+    for y in range(th):
+        row = raw[y * data.stride: y * data.stride + tw * 4]
+        out = y * tw * 3
+        rgb[out: out + tw * 3: 3] = row[2::4]
+        rgb[out + 1: out + tw * 3: 3] = row[1::4]
+        rgb[out + 2: out + tw * 3: 3] = row[0::4]
+    return f"P6\n{tw} {th}\n255\n".encode("ascii") + bytes(rgb)
+
+
 # --- Dialogs ---
 
 class SettingsDialog(tk.Toplevel):
@@ -355,6 +444,97 @@ class SyncDialog(tk.Toplevel):
         self.destroy()
 
 
+class ManualPickDialog(tk.Toplevel):
+    """Search queued albums by artist folder name; pick one with Select or a double-click."""
+
+    def __init__(self, parent: tk.Tk, queue: list[list[str]]):
+        super().__init__(parent)
+        self.title("Manually pick")
+        self.transient(parent)
+        self.geometry(f"{px(640)}x{px(460)}")
+        self.queue = queue
+        self.matches: list[list[str]] = []
+        self.result = None  # the chosen queue row
+
+        frm = ttk.Frame(self, padding=px(12))
+        frm.pack(fill="both", expand=True)
+
+        bar = ttk.Frame(frm)
+        bar.pack(fill="x")
+        ttk.Label(bar, text="Artist folder:").pack(side="left")
+        self.query = tk.StringVar()
+        entry = ttk.Entry(bar, textvariable=self.query)
+        entry.pack(side="left", fill="x", expand=True, padx=px(6))
+        entry.bind("<Return>", lambda e: self.search())
+        ttk.Button(bar, text="Search", command=self.search).pack(side="left")
+
+        self.message_var = tk.StringVar(value="Search the queue, then select an album and click Select (or double-click it).")
+        ttk.Label(frm, textvariable=self.message_var, foreground="gray").pack(anchor="w", pady=(px(8), px(4)))
+
+        list_frame = ttk.Frame(frm)
+        list_frame.pack(fill="both", expand=True)
+        # "browse" allows exactly one selected row at a time.
+        self.tree = ttk.Treeview(list_frame, columns=("artist", "album", "added"), show="headings",
+                                 selectmode="browse")
+        for col, label, width in (("artist", "Artist", 180), ("album", "Album", 280), ("added", "Date Added", 110)):
+            self.tree.heading(col, text=label)
+            self.tree.column(col, width=px(width), anchor="w")
+        self.tree.tag_configure("odd", background="#f0f0f0")
+        scroll = ttk.Scrollbar(list_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scroll.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        self.tree.bind("<Double-1>", self.on_double_click)
+        self.tree.bind("<Return>", lambda e: self.on_select())
+        self.tree.bind("<<TreeviewSelect>>", lambda e: self.update_select_button())
+
+        btns = ttk.Frame(frm)
+        btns.pack(fill="x", pady=(px(10), 0))
+        self.select_btn = ttk.Button(btns, text="Select", command=self.on_select)
+        self.select_btn.pack(side="right", padx=px(4))
+        ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="right")
+        self.update_select_button()
+
+        self.bind("<Escape>", lambda e: self.destroy())
+        entry.focus_set()
+        self.grab_set()
+
+    def search(self) -> None:
+        query = self.query.get().strip().casefold()
+        self.tree.delete(*self.tree.get_children())
+        self.update_select_button()
+        if not query:
+            self.matches = []
+            self.message_var.set("Enter part of an artist folder name to search.")
+            return
+        self.matches = sorted((r for r in self.queue if query in r[0].casefold()),
+                              key=lambda r: (r[0].casefold(), r[1].casefold()))
+        if not self.matches:
+            self.message_var.set(f"No search results for “{self.query.get().strip()}”.")
+            return
+        for i, (artist, album, created, *_) in enumerate(self.matches):
+            self.tree.insert("", "end", iid=str(i), values=(artist, album, created[:10]),
+                             tags=("odd",) if i % 2 else ())
+        self.message_var.set(f"{len(self.matches)} album(s) found. Select one and click Select, "
+                             "or double-click it.")
+
+    def update_select_button(self) -> None:
+        self.select_btn.state(["!disabled"] if self.tree.selection() else ["disabled"])
+
+    def on_double_click(self, event) -> None:
+        iid = self.tree.identify_row(event.y)
+        if iid:
+            self.tree.selection_set(iid)
+            self.on_select()
+
+    def on_select(self) -> None:
+        selected = self.tree.selection()
+        if not selected:
+            return
+        self.result = self.matches[int(selected[0])]
+        self.destroy()
+
+
 # --- Main window ---
 
 class App:
@@ -362,8 +542,8 @@ class App:
         self.root = root
         self.config = load_config()
         root.title("Album Picker")
-        root.geometry(f"{px(700)}x{px(520)}")
-        root.minsize(px(480), px(420))
+        root.geometry(f"{px(700)}x{px(580)}")
+        root.minsize(px(480), px(480))
 
         # Status bar is packed first so the expanding main frame can't squeeze it out.
         self.status_var = tk.StringVar(value="Ready.")
@@ -379,15 +559,24 @@ class App:
         self.artist_var = tk.StringVar(value="—")
         self.album_var = tk.StringVar(value="Press “Pick next album” to choose")
         self.added_var = tk.StringVar(value="")
-        ttk.Label(card, textvariable=self.artist_var, font=("Segoe UI", 18, "bold")).pack(anchor="w")
-        ttk.Label(card, textvariable=self.album_var, font=("Segoe UI", 14, "italic")).pack(anchor="w")
-        ttk.Label(card, textvariable=self.added_var, foreground="gray").pack(anchor="w", pady=(px(4), 0))
+        # Cover art, flush right; empty (zero-size) when the album has none.
+        self.cover_label = ttk.Label(card)
+        self.cover_label.pack(side="right", anchor="ne", padx=(px(12), 0))
+        self.cover_image = None  # keep a reference so Tk doesn't drop the image
+        self.cover_request = 0
+        text = ttk.Frame(card)
+        text.pack(side="left", fill="x", expand=True, anchor="n")
+        ttk.Label(text, textvariable=self.artist_var, font=("Segoe UI", 18, "bold")).pack(anchor="w")
+        ttk.Label(text, textvariable=self.album_var, font=("Segoe UI", 14, "italic")).pack(anchor="w")
+        ttk.Label(text, textvariable=self.added_var, foreground="gray").pack(anchor="w", pady=(px(4), 0))
 
         # Buttons
         btns = ttk.Frame(frm)
         btns.pack(fill="x", pady=px(12))
         self.pick_btn = ttk.Button(btns, text="🎲  Pick next album", command=self.pick)
         self.pick_btn.pack(side="left", ipadx=px(8), ipady=px(6))
+        ttk.Button(btns, text="🔍  Manually pick", command=self.manual_pick).pack(
+            side="left", padx=(px(8), 0), ipadx=px(8), ipady=px(6))
         self.update_btn = ttk.Button(btns, text="🔄  Refresh Library", command=self.update_from_library)
         self.update_btn.pack(side="left", padx=px(8), ipadx=px(8), ipady=px(6))
         ttk.Button(btns, text="⚙  Settings", command=self.open_settings).pack(side="right", ipady=px(6))
@@ -461,9 +650,40 @@ class App:
             messagebox.showinfo("Pick", "No albums left in the queue!\nUse “Refresh Library” to add some.")
             return
 
-        artist, album, created = queue.pop(random.randrange(len(queue)))[:3]
+        self.commit_pick(queue, queue.pop(random.randrange(len(queue))))
+
+    def manual_pick(self) -> None:
         try:
-            write_queue(self.csv_path, queue)
+            queue = read_rows(self.csv_path)
+        except (OSError, csv.Error) as e:
+            messagebox.showerror("Manually pick", f"Could not read {self.csv_path}:\n{e}")
+            return
+        if not queue:
+            messagebox.showinfo("Manually pick", "No albums left in the queue!\nUse “Refresh Library” to add some.")
+            return
+
+        dlg = ManualPickDialog(self.root, queue)
+        self.root.wait_window(dlg)
+        if not dlg.result:
+            return
+        key = album_key(dlg.result)
+        try:
+            queue = read_rows(self.csv_path)  # re-read in case it changed while the dialog was open
+        except (OSError, csv.Error) as e:
+            messagebox.showerror("Manually pick", f"Could not read {self.csv_path}:\n{e}")
+            return
+        index = next((i for i, r in enumerate(queue) if album_key(r) == key), None)
+        if index is None:
+            messagebox.showerror("Manually pick", "That album is no longer in the queue.")
+            self.refresh()
+            return
+        self.commit_pick(queue, queue.pop(index))
+
+    def commit_pick(self, remaining: list[list[str]], row: list[str]) -> None:
+        """Save the queue without the picked row, log it, show it, and post it to Discord."""
+        artist, album, created = row[:3]
+        try:
+            write_queue(self.csv_path, remaining)
             append_history(self.history_path, [[artist, album, created, datetime.now().strftime(DATE_FMT), "played"]])
         except OSError as e:
             messagebox.showerror("Pick", f"Could not update the queue:\n{e}")
@@ -475,6 +695,7 @@ class App:
             self.added_var.set(f"Added {created} ({time_since(created)} ago)")
         except ValueError:
             self.added_var.set(f"Added {created}")
+        self.show_cover(artist, album)
         self.refresh()
 
         url = self.config["webhook_url"]
@@ -487,6 +708,36 @@ class App:
             ).start()
         else:
             self.set_status("Picked (Discord posting is off).")
+
+    def show_cover(self, artist: str, album: str) -> None:
+        """Clear the cover, then load the album's cover image (if any) off the UI thread."""
+        self.cover_request += 1
+        request = self.cover_request
+        self.cover_image = None
+        self.cover_label.configure(image="")
+        if sys.platform != "win32" or not self.config["library_dir"]:
+            return
+        album_dir = Path(self.config["library_dir"]) / artist / album
+
+        def worker():
+            try:
+                cover = find_cover(album_dir)
+                data = load_cover_ppm(cover, px(COVER_SIZE)) if cover else None
+            except OSError:
+                data = None
+            if data:
+                self.root.after(0, self.set_cover, request, data)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def set_cover(self, request: int, data: bytes) -> None:
+        if request != self.cover_request:
+            return  # a newer pick has replaced this one
+        try:
+            self.cover_image = tk.PhotoImage(data=data, format="ppm")
+        except tk.TclError:
+            return
+        self.cover_label.configure(image=self.cover_image)
 
     # Update
     def update_from_library(self) -> None:
