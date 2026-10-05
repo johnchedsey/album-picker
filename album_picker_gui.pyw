@@ -477,8 +477,10 @@ class ManualPickDialog(tk.Toplevel):
         entry.pack(side="left", fill="x", expand=True, padx=px(6))
         entry.bind("<Return>", lambda e: self.search())
         ttk.Button(bar, text="Search", command=self.search).pack(side="left")
+        self.query.trace_add("write", lambda *_: self.on_query_changed())
 
-        self.message_var = tk.StringVar(value="Search the queue, then select an album and click Select (or double-click it).")
+        self.message_var = tk.StringVar(value="Type at least 3 letters to see matches, then select an album and click "
+                                              "Select (or double-click it).")
         ttk.Label(frm, textvariable=self.message_var, foreground="gray").pack(anchor="w", pady=(px(8), px(4)))
 
         list_frame = ttk.Frame(frm)
@@ -508,6 +510,16 @@ class ManualPickDialog(tk.Toplevel):
         self.bind("<Escape>", lambda e: self.destroy())
         entry.focus_set()
         self.grab_set()
+
+    def on_query_changed(self) -> None:
+        """Search as you type once the query has 3+ characters; Enter/Search still work for shorter ones."""
+        if len(self.query.get().strip()) >= 3:
+            self.search()
+        else:
+            self.matches = []
+            self.tree.delete(*self.tree.get_children())
+            self.update_select_button()
+            self.message_var.set("Type at least 3 letters to see matches.")
 
     def search(self) -> None:
         query = self.query.get().strip().casefold()
