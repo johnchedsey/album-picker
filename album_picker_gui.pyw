@@ -29,6 +29,7 @@ from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, font, messagebox, ttk
 
+from audiolength import AUDIO_EXTS, album_length, format_length
 from envfile import WEBHOOK_KEY, get_env, set_env
 
 APP_DIR = (
@@ -159,6 +160,57 @@ def scan_library(root: Path) -> tuple[list[list[str]], set[str]]:
             created = datetime.fromtimestamp(album.stat().st_ctime)
             results.append([artist.name, album.name, created.strftime(DATE_FMT)])
     return results, unreadable
+
+
+def folder_size(path: Path) -> int:
+    """Total size in bytes of the files under path (scandir reuses directory listings, so this is quick)."""
+    total, pending = 0, [path]
+    while pending:
+        with os.scandir(pending.pop()) as entries:
+            for entry in entries:
+                if entry.is_dir(follow_symlinks=False):
+                    pending.append(entry.path)
+                elif entry.is_file(follow_symlinks=False):
+                    total += entry.stat(follow_symlinks=False).st_size
+    return total
+
+
+def audio_check(path: Path) -> str | None:
+    """None if the folder holds at least one audio file, else a short note on what it does hold."""
+    files = size = 0
+    pending = [path]
+    while pending:
+        with os.scandir(pending.pop()) as entries:
+            for entry in entries:
+                if entry.is_dir(follow_symlinks=False):
+                    pending.append(entry.path)
+                elif entry.is_file(follow_symlinks=False):
+                    if os.path.splitext(entry.name)[1].lower() in AUDIO_EXTS and not entry.name.startswith("._"):
+                        return None
+                    files += 1
+                    size += entry.stat(follow_symlinks=False).st_size
+    if not files:
+        return "Empty folder"
+    return f"{files} file{'s' if files != 1 else ''}, {format_size(size)}, no audio"
+
+
+def find_albums_without_audio(root: Path, albums: list[list[str]]) -> list[tuple[list[str], str]]:
+    """(album row, note) for each album folder that contains no audio files."""
+    results = []
+    for row in albums:
+        try:
+            note = audio_check(root / row[0] / row[1])
+        except OSError:
+            continue  # unreadable or just deleted; not our concern here
+        if note:
+            results.append((row, note))
+    return results
+
+
+def format_size(size: int) -> str:
+    if size >= 1024 ** 3:
+        return f"{size / 1024 ** 3:.2f} GB"
+    return f"{size / 1024 ** 2:.1f} MB"
 
 
 # --- Pick helpers (from pick_album.py) ---
@@ -316,6 +368,7 @@ class SettingsDialog(tk.Toplevel):
         self.transient(parent)
         self.resizable(True, False)
         self.result = None
+        self.rebuild = False  # set when closed with "Rebuild queue…"
 
         self.library = tk.StringVar(value=config["library_dir"])
         self.csv_path = tk.StringVar(value=config["csv_path"])
@@ -341,7 +394,8 @@ class SettingsDialog(tk.Toplevel):
             row=3, column=1, sticky="w", pady=px(4), padx=px(6))
 
         btns = ttk.Frame(frm)
-        btns.grid(row=4, column=0, columnspan=3, sticky="e", pady=(px(10), 0))
+        btns.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(px(10), 0))
+        ttk.Button(btns, text="Rebuild queue…", command=self.on_rebuild).pack(side="left")
         ttk.Button(btns, text="Save", command=self.on_save).pack(side="right", padx=px(4))
         ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="right")
 
@@ -378,6 +432,91 @@ class SettingsDialog(tk.Toplevel):
         }
         self.destroy()
 
+    def on_rebuild(self):
+        """Save the settings, then have the main window rebuild the queue from a full rescan."""
+        self.on_save()
+        self.rebuild = self.result is not None
+
+
+class NoAudioDialog(tk.Toplevel):
+    """List album folders with no audio files so the user can delete them in File Explorer.
+
+    Not modal, so it can stay open while folders are deleted; "Check again" drops the ones that are gone.
+    """
+
+    def __init__(self, parent: tk.Tk, library: Path, albums: list[tuple[list[str], str]]):
+        super().__init__(parent)
+        self.title("Album folders with no audio")
+        self.geometry(f"{px(760)}x{px(420)}")
+        self.library = library
+        self.albums = albums
+
+        frm = ttk.Frame(self, padding=px(12))
+        frm.pack(fill="both", expand=True)
+        self.message_var = tk.StringVar()
+        ttk.Label(frm, textvariable=self.message_var, foreground="gray", wraplength=px(720), justify="left").pack(
+            anchor="w", pady=(0, px(4)))
+
+        list_frame = ttk.Frame(frm)
+        list_frame.pack(fill="both", expand=True)
+        self.tree = ttk.Treeview(list_frame, columns=("artist", "album", "contents"), show="headings",
+                                 selectmode="browse")
+        for col, label, width in (("artist", "Artist", 180), ("album", "Album", 320), ("contents", "Contents", 180)):
+            self.tree.heading(col, text=label)
+            self.tree.column(col, width=px(width), anchor="w")
+        self.tree.tag_configure("odd", background="#f0f0f0")
+        scroll = ttk.Scrollbar(list_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scroll.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        self.tree.bind("<Double-1>", lambda e: self.open_folder())
+        self.tree.bind("<<TreeviewSelect>>", lambda e: self.update_buttons())
+
+        btns = ttk.Frame(frm)
+        btns.pack(fill="x", pady=(px(10), 0))
+        self.open_btn = ttk.Button(btns, text="Open folder", command=self.open_folder)
+        self.open_btn.pack(side="left")
+        ttk.Button(btns, text="Close", command=self.destroy).pack(side="right")
+        ttk.Button(btns, text="Check again", command=self.recheck).pack(side="right", padx=px(4))
+
+        self.bind("<Escape>", lambda e: self.destroy())
+        self.fill()
+
+    def fill(self) -> None:
+        self.tree.delete(*self.tree.get_children())
+        for i, ((artist, album, *_), note) in enumerate(self.albums):
+            self.tree.insert("", "end", iid=str(i), values=(artist, album, note), tags=("odd",) if i % 2 else ())
+        if self.albums:
+            self.message_var.set(
+                f"{len(self.albums)} album folder(s) contain no audio files. Use Open folder (or double-click) to "
+                "check and delete them, then click Check again. Refresh Library removes deleted folders from the queue.")
+        else:
+            self.message_var.set("Every album folder contains audio files.")
+        self.update_buttons()
+
+    def update_buttons(self) -> None:
+        self.open_btn.state(["!disabled"] if self.tree.selection() else ["disabled"])
+
+    def selected_path(self) -> Path | None:
+        selected = self.tree.selection()
+        if not selected:
+            return None
+        artist, album = self.albums[int(selected[0])][0][:2]
+        return self.library / artist / album
+
+    def open_folder(self) -> None:
+        path = self.selected_path()
+        if not path:
+            return
+        try:
+            os.startfile(path)
+        except OSError as e:
+            messagebox.showerror("Open folder", f"Could not open {path}:\n{e}", parent=self)
+
+    def recheck(self) -> None:
+        self.albums = find_albums_without_audio(self.library, [row for row, _ in self.albums])
+        self.fill()
+
 
 class SyncDialog(tk.Toplevel):
     """Review changes found by a library scan: new albums and deleted albums."""
@@ -386,7 +525,8 @@ class SyncDialog(tk.Toplevel):
         super().__init__(parent)
         self.title("Library changes")
         self.transient(parent)
-        self.geometry(f"{px(680)}x{px(560 if new and missing else 400)}")
+        self.geometry(f"{px(680)}x{px(600 if new and missing else 420)}")
+        self.minsize(px(480), px(360 if new and missing else 260))
         self.new = new
         self.missing = missing
         self.result = None  # (to_add, to_skip, to_remove)
@@ -394,6 +534,19 @@ class SyncDialog(tk.Toplevel):
 
         frm = ttk.Frame(self, padding=px(12))
         frm.pack(fill="both", expand=True)
+
+        # Buttons are packed first so the expanding lists below can never squeeze them out of view.
+        btns = ttk.Frame(frm)
+        btns.pack(side="bottom", fill="x", pady=(px(10), 0))
+        ttk.Button(btns, text="Apply changes", command=self.on_ok).pack(side="right", padx=px(4))
+        ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="right")
+        actions = []
+        if new:
+            actions.append("add the selected new albums to the queue")
+        if missing:
+            actions.append("remove the selected deleted albums from it")
+        ttk.Label(btns, text="Apply changes will " + " and ".join(actions) + ".", foreground="gray").pack(
+            side="left")
 
         if new:
             self.new_list = self._section(
@@ -410,11 +563,6 @@ class SyncDialog(tk.Toplevel):
                 [f"{a} — {b}" for a, b, *_ in missing],
             )
 
-        btns = ttk.Frame(frm)
-        btns.pack(fill="x", pady=(px(10), 0))
-        ttk.Button(btns, text="Apply", command=self.on_ok).pack(side="right", padx=px(4))
-        ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="right")
-
         self.bind("<Escape>", lambda e: self.destroy())
         self.grab_set()
 
@@ -428,7 +576,7 @@ class SyncDialog(tk.Toplevel):
         list_frame = ttk.Frame(box)
         list_frame.pack(fill="both", expand=True)
         # exportselection=False keeps each list's selection independent of the other.
-        listbox = tk.Listbox(list_frame, selectmode="extended", activestyle="none", exportselection=False)
+        listbox = tk.Listbox(list_frame, selectmode="extended", activestyle="none", exportselection=False, height=4)
         scroll = ttk.Scrollbar(list_frame, orient="vertical", command=listbox.yview)
         listbox.configure(yscrollcommand=scroll.set)
         listbox.pack(side="left", fill="both", expand=True)
@@ -454,7 +602,79 @@ class SyncDialog(tk.Toplevel):
         self.destroy()
 
 
-class ManualPickDialog(tk.Toplevel):
+class PickListMixin:
+    """Select/double-click handling for a dialog with self.tree, self.select_btn and self.matches."""
+
+    def update_select_button(self) -> None:
+        self.select_btn.state(["!disabled"] if self.tree.selection() else ["disabled"])
+
+    def on_double_click(self, event) -> None:
+        iid = self.tree.identify_row(event.y)
+        if iid:
+            self.tree.selection_set(iid)
+            self.on_select()
+
+    def on_select(self) -> None:
+        selected = self.tree.selection()
+        if not selected:
+            return
+        self.result = self.matches[int(selected[0])]
+        self.destroy()
+
+
+class ShortlistDialog(PickListMixin, tk.Toplevel):
+    """Show a short ranked list of queued albums; pick one with Select or a double-click.
+
+    rows are queue rows; extra is an optional (column label, values) shown as a last column.
+    """
+
+    def __init__(self, parent: tk.Tk, title: str, rows: list[list[str]], extra: tuple[str, list[str]] | None = None):
+        super().__init__(parent)
+        self.title(title)
+        self.transient(parent)
+        self.geometry(f"{px(720)}x{px(400)}")
+        self.matches = rows
+        self.result = None  # the chosen queue row
+
+        frm = ttk.Frame(self, padding=px(12))
+        frm.pack(fill="both", expand=True)
+        ttk.Label(frm, text="Select an album and click Select (or double-click it).", foreground="gray").pack(
+            anchor="w", pady=(0, px(4)))
+
+        columns = [("artist", "Artist", 180), ("album", "Album", 280), ("added", "Date Added", 110)]
+        if extra:
+            columns.append(("extra", extra[0], 90))
+        list_frame = ttk.Frame(frm)
+        list_frame.pack(fill="both", expand=True)
+        self.tree = ttk.Treeview(list_frame, columns=[c[0] for c in columns], show="headings", selectmode="browse")
+        for col, label, width in columns:
+            self.tree.heading(col, text=label)
+            self.tree.column(col, width=px(width), anchor="e" if col == "extra" else "w", stretch=col != "extra")
+        self.tree.tag_configure("odd", background="#f0f0f0")
+        scroll = ttk.Scrollbar(list_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scroll.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        for i, (artist, album, created, *_) in enumerate(rows):
+            values = (artist, album, created[:10]) + ((extra[1][i],) if extra else ())
+            self.tree.insert("", "end", iid=str(i), values=values, tags=("odd",) if i % 2 else ())
+        self.tree.bind("<Double-1>", self.on_double_click)
+        self.tree.bind("<Return>", lambda e: self.on_select())
+        self.tree.bind("<<TreeviewSelect>>", lambda e: self.update_select_button())
+
+        btns = ttk.Frame(frm)
+        btns.pack(fill="x", pady=(px(10), 0))
+        self.select_btn = ttk.Button(btns, text="Select", command=self.on_select)
+        self.select_btn.pack(side="right", padx=px(4))
+        ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="right")
+        self.update_select_button()
+
+        self.bind("<Escape>", lambda e: self.destroy())
+        self.tree.focus_set()
+        self.grab_set()
+
+
+class ManualPickDialog(PickListMixin, tk.Toplevel):
     """Search queued albums by artist folder name; pick one with Select or a double-click."""
 
     def __init__(self, parent: tk.Tk, queue: list[list[str]]):
@@ -540,22 +760,6 @@ class ManualPickDialog(tk.Toplevel):
         self.message_var.set(f"{len(self.matches)} album(s) found. Select one and click Select, "
                              "or double-click it.")
 
-    def update_select_button(self) -> None:
-        self.select_btn.state(["!disabled"] if self.tree.selection() else ["disabled"])
-
-    def on_double_click(self, event) -> None:
-        iid = self.tree.identify_row(event.y)
-        if iid:
-            self.tree.selection_set(iid)
-            self.on_select()
-
-    def on_select(self) -> None:
-        selected = self.tree.selection()
-        if not selected:
-            return
-        self.result = self.matches[int(selected[0])]
-        self.destroy()
-
 
 # --- Main window ---
 
@@ -582,6 +786,8 @@ class App:
         self.artist_var = tk.StringVar(value="—")
         self.album_var = tk.StringVar(value="Press “Random Pick!” to choose")
         self.added_var = tk.StringVar(value="")
+        self.length_var = tk.StringVar(value="")
+        self.length_request = 0
         # Cover art, flush right; empty (zero-size) when the album has none.
         self.cover_label = ttk.Label(card)
         self.cover_label.pack(side="right", anchor="ne", padx=(px(12), 0))
@@ -592,6 +798,7 @@ class App:
         ttk.Label(text, textvariable=self.artist_var, font=("Segoe UI", 18, "bold")).pack(anchor="w")
         ttk.Label(text, textvariable=self.album_var, font=("Segoe UI", 14, "italic")).pack(anchor="w")
         ttk.Label(text, textvariable=self.added_var, foreground="gray").pack(anchor="w", pady=(px(4), 0))
+        ttk.Label(text, textvariable=self.length_var, foreground="gray").pack(anchor="w")
 
         # Buttons
         btns = ttk.Frame(frm)
@@ -602,6 +809,13 @@ class App:
             side="left", padx=(px(8), 0), ipadx=px(8), ipady=px(6))
         self.update_btn = ttk.Button(btns, text="🔄  Refresh Library", command=self.update_from_library)
         self.update_btn.pack(side="left", padx=px(8), ipadx=px(8), ipady=px(6))
+        self.shortlist_btn = ttk.Menubutton(btns, text="📋  Shortlists")
+        self.shortlist_btn.pack(side="left", ipadx=px(8), ipady=px(6))
+        menu = tk.Menu(self.shortlist_btn, tearoff=False)
+        for label, kind in (("10 oldest Date Added", "oldest"), ("10 newest Date Added", "newest"),
+                            ("10 smallest folders", "smallest"), ("10 biggest folders", "biggest")):
+            menu.add_command(label=label, command=lambda k=kind: self.shortlist_pick(k))
+        self.shortlist_btn["menu"] = menu
         ttk.Button(btns, text="⚙  Settings", command=self.open_settings).pack(side="right", ipady=px(6))
 
         # Queue count, then the queue CSV's file name as a link: click opens it with the
@@ -725,6 +939,8 @@ class App:
             save_config(self.config)
             self.refresh()
             self.set_status("Settings saved.")
+            if dlg.rebuild:
+                self.rebuild_queue()
 
     # Pick
     def pick(self) -> None:
@@ -739,17 +955,20 @@ class App:
 
         self.commit_pick(queue, queue.pop(random.randrange(len(queue))))
 
-    def manual_pick(self) -> None:
+    def read_queue_for_pick(self, title: str) -> list[list[str]] | None:
+        """The queue rows, or None (after telling the user) if it can't be read or is empty."""
         try:
             queue = read_rows(self.csv_path)
         except (OSError, csv.Error) as e:
-            messagebox.showerror("Manually pick", f"Could not read {self.csv_path}:\n{e}")
-            return
+            messagebox.showerror(title, f"Could not read {self.csv_path}:\n{e}")
+            return None
         if not queue:
-            messagebox.showinfo("Manually pick", "No albums left in the queue!\nUse “Refresh Library” to add some.")
-            return
+            messagebox.showinfo(title, "No albums left in the queue!\nUse “Refresh Library” to add some.")
+            return None
+        return queue
 
-        dlg = ManualPickDialog(self.root, queue)
+    def pick_chosen(self, title: str, dlg: tk.Toplevel) -> None:
+        """Wait for a pick dialog, then pick the album it returned (if it is still queued)."""
         self.root.wait_window(dlg)
         if not dlg.result:
             return
@@ -757,14 +976,62 @@ class App:
         try:
             queue = read_rows(self.csv_path)  # re-read in case it changed while the dialog was open
         except (OSError, csv.Error) as e:
-            messagebox.showerror("Manually pick", f"Could not read {self.csv_path}:\n{e}")
+            messagebox.showerror(title, f"Could not read {self.csv_path}:\n{e}")
             return
         index = next((i for i, r in enumerate(queue) if album_key(r) == key), None)
         if index is None:
-            messagebox.showerror("Manually pick", "That album is no longer in the queue.")
+            messagebox.showerror(title, "That album is no longer in the queue.")
             self.refresh()
             return
         self.commit_pick(queue, queue.pop(index))
+
+    def manual_pick(self) -> None:
+        queue = self.read_queue_for_pick("Manually pick")
+        if queue:
+            self.pick_chosen("Manually pick", ManualPickDialog(self.root, queue))
+
+    def shortlist_pick(self, kind: str) -> None:
+        """Offer the 10 oldest/newest queued albums by Date Added, or the 10 smallest/biggest folders."""
+        titles = {"oldest": "10 oldest Date Added", "newest": "10 newest Date Added",
+                  "smallest": "10 smallest folders", "biggest": "10 biggest folders"}
+        title = titles[kind]
+        queue = self.read_queue_for_pick(title)
+        if not queue:
+            return
+        if kind in ("oldest", "newest"):
+            rows = sorted(queue, key=lambda r: r[2], reverse=kind == "newest")[:10]
+            self.pick_chosen(title, ShortlistDialog(self.root, title, rows))
+            return
+
+        library = Path(self.config["library_dir"])
+        if not library.is_dir():
+            messagebox.showerror(title, "Music library folder not found. Check Settings.")
+            return
+        self.shortlist_btn.state(["disabled"])
+        self.set_status(f"Measuring {len(queue)} album folders ...")
+
+        def worker():
+            sized = []
+            for row in queue:
+                try:
+                    sized.append((folder_size(library / row[0] / row[1]), row))
+                except OSError:
+                    pass  # folder gone or unreadable; Refresh Library will deal with it
+            self.root.after(0, finish, sized)
+
+        def finish(sized):
+            self.shortlist_btn.state(["!disabled"])
+            self.set_status(f"Measured {len(sized)} album folders.")
+            if not sized:
+                messagebox.showerror(title, "None of the queued album folders could be read.")
+                return
+            sized.sort(key=lambda pair: pair[0], reverse=kind == "biggest")
+            top = sized[:10]
+            dlg = ShortlistDialog(self.root, title, [row for _, row in top],
+                                  extra=("Size", [format_size(size) for size, _ in top]))
+            self.pick_chosen(title, dlg)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def commit_pick(self, remaining: list[list[str]], row: list[str]) -> None:
         """Save the queue without the picked row, log it, show it, and post it to Discord."""
@@ -783,6 +1050,7 @@ class App:
         except ValueError:
             self.added_var.set(f"Added {short_time(created)}")
         self.show_cover(artist, album)
+        self.show_length(artist, album)
         self.refresh()
 
         url = self.config["webhook_url"]
@@ -826,11 +1094,38 @@ class App:
             return
         self.cover_label.configure(image=self.cover_image)
 
+    def show_length(self, artist: str, album: str) -> None:
+        """Total up the album's track lengths (read from file headers) off the UI thread."""
+        self.length_request += 1
+        request = self.length_request
+        if not self.config["library_dir"]:
+            self.length_var.set("")
+            return
+        album_dir = Path(self.config["library_dir"]) / artist / album
+        self.length_var.set("Length: …")
+
+        def worker():
+            seconds, tracks, failed = album_length(album_dir)
+            if tracks:
+                text = f"Length: {format_length(seconds)}  •  {tracks} track{'s' if tracks != 1 else ''}"
+                if failed:
+                    text += f" ({failed} unreadable)"
+            else:
+                text = "Length: unknown" + (f" ({failed} unreadable tracks)" if failed else "")
+            self.root.after(0, self.set_length, request, text)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def set_length(self, request: int, text: str) -> None:
+        if request == self.length_request:  # ignore results for an earlier pick
+            self.length_var.set(text)
+
     # Update
-    def update_from_library(self) -> None:
+    def scan_in_background(self, title: str, on_done) -> None:
+        """Scan the library off the UI thread, then call on_done(found, unreadable) unless it failed."""
         library = Path(self.config["library_dir"])
         if not library.is_dir():
-            messagebox.showerror("Update", "Music library folder not found. Check Settings.")
+            messagebox.showerror(title, "Music library folder not found. Check Settings.")
             return
         self.update_btn.state(["disabled"])
         self.set_status(f"Scanning {library} ...")
@@ -838,25 +1133,43 @@ class App:
         def worker():
             try:
                 found, unreadable = scan_library(library)
+                no_audio = find_albums_without_audio(library, found)
                 error = None
             except OSError as e:
-                found, unreadable, error = [], set(), e
-            self.root.after(0, self.finish_update, found, unreadable, error)
+                found, unreadable, no_audio, error = [], set(), [], e
+            self.root.after(0, finish, found, unreadable, no_audio, error)
+
+        def finish(found, unreadable, no_audio, error):
+            self.update_btn.state(["!disabled"])
+            if error:
+                self.set_status("Scan failed.")
+                messagebox.showerror(title, f"Scan failed:\n{error}")
+            elif not found:
+                # Guard against an unplugged drive / unmounted share making every album look deleted.
+                self.set_status("Scan found no albums.")
+                messagebox.showerror(title, "No albums found in the library folder.\n"
+                                            "Is the drive connected? Nothing was changed.")
+            else:
+                on_done(found, unreadable)
+                if no_audio:
+                    self.show_no_audio(library, no_audio)
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def finish_update(self, found: list[list[str]], unreadable: set[str], error: Exception | None) -> None:
-        self.update_btn.state(["!disabled"])
-        if error:
-            self.set_status("Scan failed.")
-            messagebox.showerror("Update", f"Scan failed:\n{error}")
-            return
-        if not found:
-            # Guard against an unplugged drive / unmounted share making every album look deleted.
-            self.set_status("Scan found no albums.")
-            messagebox.showerror("Update", "No albums found in the library folder.\n"
-                                           "Is the drive connected? Nothing was changed.")
-            return
+    def show_no_audio(self, library: Path, albums: list[tuple[list[str], str]]) -> None:
+        """Show (or refill) the list of album folders that have no audio files."""
+        dlg = getattr(self, "no_audio_dialog", None)
+        if dlg is not None and dlg.winfo_exists():
+            dlg.library, dlg.albums = library, albums
+            dlg.fill()
+            dlg.lift()
+        else:
+            self.no_audio_dialog = NoAudioDialog(self.root, library, albums)
+
+    def update_from_library(self) -> None:
+        self.scan_in_background("Update", self.finish_update)
+
+    def finish_update(self, found: list[list[str]], unreadable: set[str]) -> None:
         try:
             queue = read_rows(self.csv_path)
             history = read_rows(self.history_path)
@@ -897,6 +1210,37 @@ class App:
             parts.append(f"marked {len(to_skip)} as already heard")
         self.set_status(", ".join(parts) + " album(s).")
 
+    def rebuild_queue(self) -> None:
+        """Rescan the whole library and write a brand-new queue CSV (like re-running albumfinder.py)."""
+        if not messagebox.askokcancel(
+            "Rebuild queue",
+            f"Rescan all of {self.config['library_dir']} and write a new {self.csv_path.name} "
+            "listing every album found?\n\nThe current queue is replaced. played.csv is not changed.",
+            icon="warning",
+        ):
+            return
+        try:
+            self.rebuild_old_count = len(read_rows(self.csv_path))
+        except (OSError, csv.Error):
+            self.rebuild_old_count = None
+        self.scan_in_background("Rebuild queue", self.finish_rebuild)
+
+    def finish_rebuild(self, found: list[list[str]], unreadable: set[str]) -> None:
+        try:
+            write_queue(self.csv_path, found)
+        except OSError as e:
+            messagebox.showerror("Rebuild queue", f"Could not write {self.csv_path}:\n{e}")
+            return
+        self.refresh()
+        self.set_status(f"Rebuilt queue: {len(found)} album(s) from a full library scan.")
+        message = f"Wrote a new {self.csv_path.name} with {len(found)} album(s)"
+        if self.rebuild_old_count is not None:
+            message += f" (was {self.rebuild_old_count})"
+        message += "."
+        if unreadable:
+            message += (f"\n\nCouldn't read {len(unreadable)} artist folder(s), so their albums are not "
+                        "in the queue:\n" + "\n".join(sorted(unreadable)[:10]))
+        messagebox.showinfo("Rebuild queue", message)
 
 def enable_high_dpi() -> None:
     """Tell Windows we render at native resolution, so it doesn't bitmap-stretch (blur) the window."""
