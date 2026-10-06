@@ -47,6 +47,14 @@ idx = random.randint(0, len(data) - 1)
 picked = data.pop(idx)
 artist, album, date = picked
 
+# --- Display name ("Barbarians of California, the" -> "The Barbarians of California") ---
+def display_artist(name):
+    """Folder name -> display name: "Barbarians of California, the" -> "The Barbarians of California"."""
+    if name.lower().endswith(", the"):
+        return "The " + name[:-5].rstrip()
+    return name
+
+
 # --- Calculate time since added ---
 def time_since(date_str):
     added = datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S")
@@ -74,7 +82,7 @@ def time_since(date_str):
 
 elapsed = time_since(date)
 
-print(f"\n💿 Selected: {artist} — {album}")
+print(f"\n💿 Selected: {display_artist(artist)} — {album}")
 print(f"   Added: {date} ({elapsed} ago)\n")
 
 # --- Write updated CSV back ---
@@ -86,7 +94,7 @@ with open(CSV_PATH, 'w', newline='', encoding='utf-8') as f:
 print(f"{len(data)} albums remaining in queue.")
 
 # --- Post to Discord (with retry on 429) ---
-message = f"💿 Up Next: **{artist}** — *{album}*"
+message = f"💿 Up Next: **{display_artist(artist)}** — *{album}*"
 payload = json.dumps({"content": message}).encode("utf-8")
 
 for attempt in range(1, MAX_RETRIES + 1):

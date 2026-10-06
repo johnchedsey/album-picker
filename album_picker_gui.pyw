@@ -220,6 +220,13 @@ def short_time(date_str: str) -> str:
     return date_str[:16]
 
 
+def display_artist(name: str) -> str:
+    """Folder name -> display name: "Barbarians of California, the" -> "The Barbarians of California"."""
+    if name.lower().endswith(", the"):
+        return "The " + name[:-5].rstrip()
+    return name
+
+
 def time_since(date_str: str) -> str:
     added = datetime.strptime(date_str, DATE_FMT)
     now = datetime.now()
@@ -1043,7 +1050,7 @@ class App:
             messagebox.showerror("Pick", f"Could not update the queue:\n{e}")
             return
 
-        self.artist_var.set(artist)
+        self.artist_var.set(display_artist(artist))
         self.album_var.set(album)
         try:
             self.added_var.set(f"Added {short_time(created)} ({time_since(created)} ago)")
@@ -1056,7 +1063,7 @@ class App:
         url = self.config["webhook_url"]
         if self.config["post_to_discord"] and url:
             self.set_status("Posting to Discord...")
-            message = f"💿 Up Next: **{artist}** — *{album}*"
+            message = f"💿 Up Next: **{display_artist(artist)}** — *{album}*"
             threading.Thread(
                 target=lambda: self.root.after(0, self.set_status, post_to_discord(url, message)),
                 daemon=True,
