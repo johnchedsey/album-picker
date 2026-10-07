@@ -313,8 +313,9 @@ def find_cover(album_dir: Path) -> Path | None:
     return None
 
 
-def load_cover_ppm(path: Path, max_side: int) -> bytes:
-    """Decode an image with GDI+, scale it to fit max_side, and return it as PPM data."""
+def load_cover_ppm(path: Path, max_side: int) -> tuple[bytes, tuple[int, int]]:
+    """Decode an image with GDI+, scale it to fit max_side, and return it as PPM data
+    along with the original (width, height) in pixels."""
     import ctypes
 
     class BitmapData(ctypes.Structure):
@@ -332,6 +333,7 @@ def load_cover_ppm(path: Path, max_side: int) -> bytes:
         gdi.GdipGetImageHeight(src, ctypes.byref(h))
         if not w.value or not h.value:
             raise OSError(f"Empty image {path}")
+        size = (w.value, h.value)
         ratio = max_side / max(w.value, h.value)
         tw, th = max(1, round(w.value * ratio)), max(1, round(h.value * ratio))
 
@@ -363,7 +365,7 @@ def load_cover_ppm(path: Path, max_side: int) -> bytes:
         rgb[out: out + tw * 3: 3] = row[2::4]
         rgb[out + 1: out + tw * 3: 3] = row[1::4]
         rgb[out + 2: out + tw * 3: 3] = row[0::4]
-    return f"P6\n{tw} {th}\n255\n".encode("ascii") + bytes(rgb)
+    return f"P6\n{tw} {th}\n255\n".encode("ascii") + bytes(rgb), size
 
 
 # --- Dialogs ---
@@ -795,9 +797,13 @@ class App:
         self.added_var = tk.StringVar(value="")
         self.length_var = tk.StringVar(value="")
         self.length_request = 0
-        # Cover art, flush right; empty (zero-size) when the album has none.
-        self.cover_label = ttk.Label(card)
-        self.cover_label.pack(side="right", anchor="ne", padx=(px(12), 0))
+        # Cover art, flush right, with its pixel dimensions below; empty (zero-size) when the album has none.
+        cover_box = ttk.Frame(card)
+        cover_box.pack(side="right", anchor="ne", padx=(px(12), 0))
+        self.cover_label = ttk.Label(cover_box)
+        self.cover_label.pack()
+        self.cover_size_var = tk.StringVar(value="")
+        ttk.Label(cover_box, textvariable=self.cover_size_var, foreground="gray").pack()
         self.cover_image = None  # keep a reference so Tk doesn't drop the image
         self.cover_request = 0
         text = ttk.Frame(card)
@@ -1077,6 +1083,7 @@ class App:
         request = self.cover_request
         self.cover_image = None
         self.cover_label.configure(image="")
+        self.cover_size_var.set("")
         if sys.platform != "win32" or not self.config["library_dir"]:
             return
         album_dir = Path(self.config["library_dir"]) / artist / album
@@ -1084,15 +1091,15 @@ class App:
         def worker():
             try:
                 cover = find_cover(album_dir)
-                data = load_cover_ppm(cover, px(COVER_SIZE)) if cover else None
+                loaded = load_cover_ppm(cover, px(COVER_SIZE)) if cover else None
             except OSError:
-                data = None
-            if data:
-                self.root.after(0, self.set_cover, request, data)
+                loaded = None
+            if loaded:
+                self.root.after(0, self.set_cover, request, *loaded)
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def set_cover(self, request: int, data: bytes) -> None:
+    def set_cover(self, request: int, data: bytes, size: tuple[int, int]) -> None:
         if request != self.cover_request:
             return  # a newer pick has replaced this one
         try:
@@ -1100,6 +1107,7 @@ class App:
         except tk.TclError:
             return
         self.cover_label.configure(image=self.cover_image)
+        self.cover_size_var.set(f"{size[0]}x{size[1]}")
 
     def show_length(self, artist: str, album: str) -> None:
         """Total up the album's track lengths (read from file headers) off the UI thread."""
