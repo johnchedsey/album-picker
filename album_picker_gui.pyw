@@ -41,7 +41,7 @@ QUEUE_HEADER = ["First_Level_Directory", "Second_Level_Directory", "Created_Date
 HISTORY_HEADER = ["Artist", "Album", "Created_Date", "Picked_Date", "Status"]
 DATE_FMT = "%Y-%m-%d %H:%M:%S"  # stored in the CSVs; pick_album.py parses this exact format
 MAX_RETRIES = 5
-RECENT_COUNT = 25
+RECENT_COUNT = 25  # default number of Recent picks shown; 0 shows them all
 
 # Ratio of the screen's DPI to the classic 96 DPI; set in main() once Tk is up.
 SCALE = 1.0
@@ -57,6 +57,7 @@ DEFAULT_CONFIG = {
     "csv_path": str(APP_DIR / "albums.csv"),
     "webhook_url": "",
     "post_to_discord": True,
+    "recent_count": RECENT_COUNT,
     "window_size": "",  # "WxH" in screen pixels, remembered between runs
     "window_zoomed": False,
     "recent_columns": {},  # Recent picks column widths in screen pixels, by column id
@@ -96,6 +97,14 @@ def save_config(config: dict) -> None:
 
 def history_path(csv_path: Path) -> Path:
     return csv_path.with_name("played.csv")
+
+
+def show_in_folder(path: Path) -> None:
+    """Open File Explorer with the file selected, or just its folder if the file doesn't exist yet."""
+    if path.exists():
+        subprocess.Popen(["explorer.exe", f"/select,{path}"])
+    elif path.parent.is_dir():
+        os.startfile(path.parent)
 
 
 def read_rows(path: Path) -> list[list[str]]:
@@ -383,6 +392,10 @@ class SettingsDialog(tk.Toplevel):
         self.csv_path = tk.StringVar(value=config["csv_path"])
         self.webhook = tk.StringVar(value=config["webhook_url"])
         self.post = tk.BooleanVar(value=config["post_to_discord"])
+        self.recent_count = tk.StringVar(value=str(config.get("recent_count", RECENT_COUNT)))
+        self.history = tk.StringVar()
+        self.csv_path.trace_add("write", lambda *_: self.update_history_path())
+        self.update_history_path()
 
         frm = ttk.Frame(self, padding=px(12))
         frm.pack(fill="both", expand=True)
@@ -396,20 +409,38 @@ class SettingsDialog(tk.Toplevel):
         ttk.Entry(frm, textvariable=self.csv_path, width=60).grid(row=1, column=1, sticky="ew", padx=px(6))
         ttk.Button(frm, text="Browse...", command=self.browse_csv).grid(row=1, column=2)
 
-        ttk.Label(frm, text="Discord webhook URL:").grid(row=2, column=0, sticky="w", pady=px(4))
-        ttk.Entry(frm, textvariable=self.webhook, width=60, show="•").grid(row=2, column=1, sticky="ew", padx=px(6))
+        # The played log always lives beside the queue CSV, so it is shown but not editable.
+        ttk.Label(frm, text="Recent picks log:").grid(row=2, column=0, sticky="w", pady=px(4))
+        ttk.Entry(frm, textvariable=self.history, width=60, state="readonly").grid(
+            row=2, column=1, sticky="ew", padx=px(6))
+        ttk.Button(frm, text="Show in folder", command=lambda: show_in_folder(Path(self.history.get()))).grid(
+            row=2, column=2)
+
+        ttk.Label(frm, text="Recent picks to show:").grid(row=3, column=0, sticky="w", pady=px(4))
+        count_row = ttk.Frame(frm)
+        count_row.grid(row=3, column=1, sticky="w", padx=px(6))
+        ttk.Spinbox(count_row, textvariable=self.recent_count, from_=0, to=10000, increment=5, width=8).pack(
+            side="left")
+        ttk.Label(count_row, text="(0 = show all)", foreground="gray").pack(side="left", padx=px(6))
+
+        ttk.Label(frm, text="Discord webhook URL:").grid(row=4, column=0, sticky="w", pady=px(4))
+        ttk.Entry(frm, textvariable=self.webhook, width=60, show="•").grid(row=4, column=1, sticky="ew", padx=px(6))
 
         ttk.Checkbutton(frm, text="Post picks to Discord", variable=self.post).grid(
-            row=3, column=1, sticky="w", pady=px(4), padx=px(6))
+            row=5, column=1, sticky="w", pady=px(4), padx=px(6))
 
         btns = ttk.Frame(frm)
-        btns.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(px(10), 0))
+        btns.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(px(10), 0))
         ttk.Button(btns, text="Rebuild queue…", command=self.on_rebuild).pack(side="left")
         ttk.Button(btns, text="Save", command=self.on_save).pack(side="right", padx=px(4))
         ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="right")
 
         self.bind("<Escape>", lambda e: self.destroy())
         self.grab_set()
+
+    def update_history_path(self):
+        csv_path = self.csv_path.get().strip()
+        self.history.set(str(history_path(Path(csv_path))) if csv_path else "")
 
     def browse_library(self):
         path = filedialog.askdirectory(parent=self, initialdir=self.library.get() or None)
@@ -433,11 +464,19 @@ class SettingsDialog(tk.Toplevel):
         if not self.csv_path.get().strip():
             messagebox.showerror("Settings", "Please choose a queue CSV file.", parent=self)
             return
+        try:
+            recent_count = int(self.recent_count.get().strip())
+            if recent_count < 0:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror("Settings", "Recent picks to show must be a whole number (0 = all).", parent=self)
+            return
         self.result = {
             "library_dir": self.library.get().strip(),
             "csv_path": self.csv_path.get().strip(),
             "webhook_url": self.webhook.get().strip(),
             "post_to_discord": self.post.get(),
+            "recent_count": recent_count,
         }
         self.destroy()
 
@@ -920,7 +959,7 @@ class App:
             messagebox.showerror("Open queue", f"Could not open {path}:\n{e}")
 
     def show_queue_file(self) -> None:
-        subprocess.Popen(["explorer.exe", f"/select,{self.csv_path}"])
+        show_in_folder(self.csv_path)
 
     def set_status(self, text: str) -> None:
         self.status_var.set(text)
@@ -938,7 +977,8 @@ class App:
         self.queue_link.pack(side="left")
         self.tree.delete(*self.tree.get_children())
         played = [h for h in history if len(h) >= 5 and h[4] == "played"]
-        recent = reversed(played[-RECENT_COUNT:])
+        count = self.config.get("recent_count", RECENT_COUNT)
+        recent = reversed(played[-count:] if count > 0 else played)
         for i, (artist, album, created, picked, _status) in enumerate(recent):
             self.tree.insert("", "end", values=(short_time(picked), artist, album, created[:10]),
                              tags=("odd",) if i % 2 else ())
