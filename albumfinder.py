@@ -8,6 +8,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+# <Artist>/<Album> folders never scanned (may hold incomplete downloads); lower-case, same list as album_picker_gui.pyw
+EXCLUDED_ALBUMS = {("incoming", "complete"), ("incoming", "downloading")}
 
 def scan_directories(start_path: Path, output_file: Path) -> None:
     print(f"Scanning directory: {start_path}")
@@ -37,6 +39,9 @@ def scan_directories(start_path: Path, output_file: Path) -> None:
             continue
 
         for second_dir in second_level:
+            if (first_dir.name.lower(), second_dir.name.lower()) in EXCLUDED_ALBUMS:
+                print(f"  Excluded: {second_dir.name}")
+                continue
             print(f"  Found: {second_dir.name}")
             created = datetime.fromtimestamp(second_dir.stat().st_ctime)
             results.append({

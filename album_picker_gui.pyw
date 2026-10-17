@@ -42,6 +42,8 @@ HISTORY_HEADER = ["Artist", "Album", "Created_Date", "Picked_Date", "Status"]
 DATE_FMT = "%Y-%m-%d %H:%M:%S"  # stored in the CSVs; pick_album.py parses this exact format
 MAX_RETRIES = 5
 RECENT_COUNT = 25  # default number of Recent picks shown; 0 shows them all
+# <Artist>/<Album> folders never scanned (may hold incomplete downloads); lower-case, same list as albumfinder.py
+EXCLUDED_ALBUMS = {("incoming", "complete"), ("incoming", "downloading")}
 
 # Ratio of the screen's DPI to the classic 96 DPI; set in main() once Tk is up.
 SCALE = 1.0
@@ -155,17 +157,29 @@ def compute_changes(found, unreadable, queue, history):
 
 # --- Library scan (same rules as albumfinder.py) ---
 
-def scan_library(root: Path) -> tuple[list[list[str]], set[str]]:
+class ScanCancelled(Exception):
+    """Raised inside a library scan when the user cancels it."""
+
+
+def check_cancel(cancel: threading.Event | None) -> None:
+    if cancel is not None and cancel.is_set():
+        raise ScanCancelled
+
+
+def scan_library(root: Path, cancel: threading.Event | None = None) -> tuple[list[list[str]], set[str]]:
     """Return (albums found, names of artist folders that couldn't be read)."""
     results = []
     unreadable = set()
     for artist in sorted((d for d in root.iterdir() if d.is_dir()), key=lambda d: d.name.lower()):
+        check_cancel(cancel)
         try:
             albums = sorted((d for d in artist.iterdir() if d.is_dir()), key=lambda d: d.name.lower())
         except OSError:
             unreadable.add(artist.name)
             continue
         for album in albums:
+            if (artist.name.lower(), album.name.lower()) in EXCLUDED_ALBUMS:
+                continue
             created = datetime.fromtimestamp(album.stat().st_ctime)
             results.append([artist.name, album.name, created.strftime(DATE_FMT)])
     return results, unreadable
@@ -203,10 +217,12 @@ def audio_check(path: Path) -> str | None:
     return f"{files} file{'s' if files != 1 else ''}, {format_size(size)}, no audio"
 
 
-def find_albums_without_audio(root: Path, albums: list[list[str]]) -> list[tuple[list[str], str]]:
+def find_albums_without_audio(root: Path, albums: list[list[str]],
+                              cancel: threading.Event | None = None) -> list[tuple[list[str], str]]:
     """(album row, note) for each album folder that contains no audio files."""
     results = []
     for row in albums:
+        check_cancel(cancel)
         try:
             note = audio_check(root / row[0] / row[1])
         except OSError:
@@ -861,6 +877,7 @@ class App:
             side="left", padx=(px(8), 0), ipadx=px(8), ipady=px(6))
         self.update_btn = ttk.Button(btns, text="🔄  Refresh Library", command=self.update_from_library)
         self.update_btn.pack(side="left", padx=px(8), ipadx=px(8), ipady=px(6))
+        self.scan_cancel = None  # threading.Event while a library scan is running
         self.shortlist_btn = ttk.Menubutton(btns, text="📋  Shortlists")
         self.shortlist_btn.pack(side="left", ipadx=px(8), ipady=px(6))
         menu = tk.Menu(self.shortlist_btn, tearoff=False)
@@ -1182,21 +1199,33 @@ class App:
         if not library.is_dir():
             messagebox.showerror(title, "Music library folder not found. Check Settings.")
             return
-        self.update_btn.state(["disabled"])
+        if self.scan_cancel is not None:
+            messagebox.showinfo(title, "A library scan is already running. Cancel it or wait for it to finish.")
+            return
+        cancel = self.scan_cancel = threading.Event()
+        # While scanning, the Refresh Library button becomes the way to cancel.
+        self.update_btn.configure(text="✖  Cancel scan", command=self.cancel_scan)
         self.set_status(f"Scanning {library} ...")
 
         def worker():
+            cancelled = False
             try:
-                found, unreadable = scan_library(library)
-                no_audio = find_albums_without_audio(library, found)
+                found, unreadable = scan_library(library, cancel)
+                no_audio = find_albums_without_audio(library, found, cancel)
                 error = None
+            except ScanCancelled:
+                found, unreadable, no_audio, error, cancelled = [], set(), [], None, True
             except OSError as e:
                 found, unreadable, no_audio, error = [], set(), [], e
-            self.root.after(0, finish, found, unreadable, no_audio, error)
+            self.root.after(0, finish, found, unreadable, no_audio, error, cancelled)
 
-        def finish(found, unreadable, no_audio, error):
+        def finish(found, unreadable, no_audio, error, cancelled):
+            self.scan_cancel = None
+            self.update_btn.configure(text="🔄  Refresh Library", command=self.update_from_library)
             self.update_btn.state(["!disabled"])
-            if error:
+            if cancelled:
+                self.set_status("Scan cancelled. Nothing was changed.")
+            elif error:
                 self.set_status("Scan failed.")
                 messagebox.showerror(title, f"Scan failed:\n{error}")
             elif not found:
@@ -1210,6 +1239,12 @@ class App:
                     self.show_no_audio(library, no_audio)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def cancel_scan(self) -> None:
+        if self.scan_cancel is not None:
+            self.scan_cancel.set()
+            self.update_btn.state(["disabled"])  # re-enabled once the worker stops
+            self.set_status("Cancelling scan ...")
 
     def show_no_audio(self, library: Path, albums: list[tuple[list[str], str]]) -> None:
         """Show (or refill) the list of album folders that have no audio files."""
