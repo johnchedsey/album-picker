@@ -276,8 +276,8 @@ def time_since(date_str: str) -> str:
     return ", ".join(parts)
 
 
-def post_to_discord(webhook_url: str, message: str) -> str:
-    """Post a message, retrying on HTTP 429. Returns a status string."""
+def post_to_discord(webhook_url: str, message: str) -> tuple[bool, str]:
+    """Post a message, retrying on HTTP 429. Returns (success, status string)."""
     payload = json.dumps({"content": message}).encode("utf-8")
     for _ in range(MAX_RETRIES):
         req = urllib.request.Request(
@@ -288,18 +288,18 @@ def post_to_discord(webhook_url: str, message: str) -> str:
         )
         try:
             with urllib.request.urlopen(req, timeout=15) as res:
-                return f"Posted to Discord (status {res.status})"
+                return True, f"Posted to Discord (status {res.status})"
         except urllib.error.HTTPError as e:
             if e.code != 429:
-                return f"Discord post failed: {e}"
+                return False, f"Discord post failed: {e}"
             try:
                 retry_after = float(json.loads(e.read().decode("utf-8")).get("retry_after", 5))
             except Exception:
                 retry_after = 5
             time.sleep(retry_after)
         except Exception as e:
-            return f"Discord post failed: {e}"
-    return "Failed to post to Discord after maximum retries."
+            return False, f"Discord post failed: {e}"
+    return False, "Failed to post to Discord after maximum retries."
 
 
 # --- Cover art ---
@@ -837,9 +837,14 @@ class App:
         root.protocol("WM_DELETE_WINDOW", self.on_close)
 
         # Status bar is packed first so the expanding main frame can't squeeze it out.
+        # A "Retry Discord post" button appears at its right end only after a post fails.
+        status_bar = ttk.Frame(root, relief="sunken")
+        status_bar.pack(side="bottom", fill="x")
         self.status_var = tk.StringVar(value="Ready.")
-        ttk.Label(root, textvariable=self.status_var, relief="sunken", anchor="w", padding=(px(8), px(2))).pack(
-            side="bottom", fill="x")
+        self.retry_post_btn = ttk.Button(status_bar, text="Retry Discord post", command=self.retry_post)
+        self.failed_post = None  # message text of the last Discord post that failed
+        ttk.Label(status_bar, textvariable=self.status_var, anchor="w", padding=(px(8), px(2))).pack(
+            side="left", fill="x", expand=True)
 
         frm = ttk.Frame(root, padding=px(16))
         frm.pack(fill="both", expand=True)
@@ -1123,16 +1128,42 @@ class App:
         self.show_length(artist, album)
         self.refresh()
 
-        url = self.config["webhook_url"]
-        if self.config["post_to_discord"] and url:
-            self.set_status("Posting to Discord...")
-            message = f"💿 Up Next: **{display_artist(artist)}** — *{album}*"
-            threading.Thread(
-                target=lambda: self.root.after(0, self.set_status, post_to_discord(url, message)),
-                daemon=True,
-            ).start()
+        message = f"💿 Up Next: **{display_artist(artist)}** — *{album}*"
+        if self.config["post_to_discord"] and self.config["webhook_url"]:
+            self.send_post(message)
         else:
+            self.clear_failed_post()
             self.set_status("Picked (Discord posting is off).")
+
+    def send_post(self, message: str) -> None:
+        """Post to Discord off the UI thread; on failure, offer the Retry Discord post button."""
+        url = self.config["webhook_url"]
+        self.clear_failed_post()
+        self.set_status("Posting to Discord...")
+
+        def worker():
+            ok, status = post_to_discord(url, message)
+            self.root.after(0, done, ok, status)
+
+        def done(ok, status):
+            self.set_status(status)
+            if not ok:
+                self.failed_post = message
+                self.retry_post_btn.pack(side="right", padx=px(4), pady=px(2))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def retry_post(self) -> None:
+        if not self.failed_post:
+            return
+        if not self.config["webhook_url"]:
+            messagebox.showerror("Retry Discord post", "No Discord webhook URL is set. Add one in Settings.")
+            return
+        self.send_post(self.failed_post)
+
+    def clear_failed_post(self) -> None:
+        self.failed_post = None
+        self.retry_post_btn.pack_forget()
 
     def show_cover(self, artist: str, album: str) -> None:
         """Clear the cover, then load the album's cover image (if any) off the UI thread."""
