@@ -5,7 +5,7 @@ Album Picker GUI - Windows front end for albumfinder.py + pick_album.py.
     that are not already queued and have not been picked before, and offers to
     remove queued albums whose folders have been deleted.
   * Random Pick!: pops a random album from the queue CSV, logs it to the
-    history file, and posts it to Discord.
+    history file, and shows a "Post To Discord" button to post it.
 
 The queue CSV keeps the same format albumfinder.py writes, so pick_album.py
 still works against it. Picks are logged to played.csv next to the queue.
@@ -442,7 +442,7 @@ class SettingsDialog(tk.Toplevel):
         ttk.Label(frm, text="Discord webhook URL:").grid(row=4, column=0, sticky="w", pady=px(4))
         ttk.Entry(frm, textvariable=self.webhook, width=60, show="•").grid(row=4, column=1, sticky="ew", padx=px(6))
 
-        ttk.Checkbutton(frm, text="Post picks to Discord", variable=self.post).grid(
+        ttk.Checkbutton(frm, text="Show “Post To Discord” button", variable=self.post).grid(
             row=5, column=1, sticky="w", pady=px(4), padx=px(6))
 
         btns = ttk.Frame(frm)
@@ -837,12 +837,9 @@ class App:
         root.protocol("WM_DELETE_WINDOW", self.on_close)
 
         # Status bar is packed first so the expanding main frame can't squeeze it out.
-        # A "Retry Discord post" button appears at its right end only after a post fails.
         status_bar = ttk.Frame(root, relief="sunken")
         status_bar.pack(side="bottom", fill="x")
         self.status_var = tk.StringVar(value="Ready.")
-        self.retry_post_btn = ttk.Button(status_bar, text="Retry Discord post", command=self.retry_post)
-        self.failed_post = None  # message text of the last Discord post that failed
         ttk.Label(status_bar, textvariable=self.status_var, anchor="w", padding=(px(8), px(2))).pack(
             side="left", fill="x", expand=True)
 
@@ -872,6 +869,10 @@ class App:
         ttk.Label(text, textvariable=self.album_var, font=("Segoe UI", 14, "italic")).pack(anchor="w")
         ttk.Label(text, textvariable=self.added_var, foreground="gray").pack(anchor="w", pady=(px(4), 0))
         ttk.Label(text, textvariable=self.length_var, foreground="gray").pack(anchor="w")
+        # Shown after a pick (if Discord posting is on); becomes "Retry Post" if the post fails.
+        self.post_btn = ttk.Button(text, text="Post To Discord", command=self.post_current)
+        self.post_message = None  # Discord message for the current pick
+        self.post_request = 0
 
         # Buttons
         btns = ttk.Frame(frm)
@@ -920,10 +921,15 @@ class App:
             width = saved if isinstance(saved, int) and saved >= px(30) else px(width)
             self.tree.column(col, width=width, anchor="w")
         self.tree.tag_configure("odd", background="#f0f0f0")
+        # The scrollbar is packed first so the wide, expanding tree can't squeeze it out.
         scroll = ttk.Scrollbar(recent, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll.set)
-        self.tree.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
+        self.tree.pack(side="left", fill="both", expand=True)
+        self.tree.bind("<Home>", lambda e: self.select_recent(0))
+        self.tree.bind("<End>", lambda e: self.select_recent(-1))
+        self.tree.bind("<Prior>", lambda e: self.tree.yview_scroll(-1, "pages"))
+        self.tree.bind("<Next>", lambda e: self.tree.yview_scroll(1, "pages"))
 
         self.refresh()
         if not self.config["library_dir"]:
@@ -1005,6 +1011,16 @@ class App:
             self.tree.insert("", "end", values=(short_time(picked), artist, album, created[:10]),
                              tags=("odd",) if i % 2 else ())
 
+    def select_recent(self, index: int) -> str:
+        """Select and scroll to the first (0) or last (-1) Recent picks row."""
+        items = self.tree.get_children()
+        if items:
+            item = items[index]
+            self.tree.selection_set(item)
+            self.tree.focus(item)
+            self.tree.see(item)
+        return "break"
+
     # Settings
     def open_settings(self) -> None:
         dlg = SettingsDialog(self.root, self.config)
@@ -1013,6 +1029,7 @@ class App:
             self.config.update(dlg.result)  # keep keys the dialog doesn't edit (e.g. window size)
             save_config(self.config)
             self.refresh()
+            self.update_post_button()
             self.set_status("Settings saved.")
             if dlg.rebuild:
                 self.rebuild_queue()
@@ -1109,7 +1126,7 @@ class App:
         threading.Thread(target=worker, daemon=True).start()
 
     def commit_pick(self, remaining: list[list[str]], row: list[str]) -> None:
-        """Save the queue without the picked row, log it, show it, and post it to Discord."""
+        """Save the queue without the picked row, log it, and show it with a Post To Discord button."""
         artist, album, created = row[:3]
         try:
             write_queue(self.csv_path, remaining)
@@ -1128,17 +1145,30 @@ class App:
         self.show_length(artist, album)
         self.refresh()
 
-        message = f"💿 Up Next: **{display_artist(artist)}** — *{album}*"
-        if self.config["post_to_discord"] and self.config["webhook_url"]:
-            self.send_post(message)
-        else:
-            self.clear_failed_post()
-            self.set_status("Picked (Discord posting is off).")
+        self.post_message = f"💿 Up Next: **{display_artist(artist)}** — *{album}*"
+        self.post_request += 1  # ignore results of a post still running for the previous pick
+        self.post_btn.configure(text="Post To Discord")
+        self.post_btn.state(["!disabled"])
+        self.update_post_button()
+        self.set_status(f"Picked {display_artist(artist)} — {album}.")
 
-    def send_post(self, message: str) -> None:
-        """Post to Discord off the UI thread; on failure, offer the Retry Discord post button."""
+    def update_post_button(self) -> None:
+        """Show the Post To Discord button only once something is picked and posting is on."""
+        if self.post_message and self.config["post_to_discord"]:
+            self.post_btn.pack(anchor="w", pady=(px(8), 0), ipadx=px(4))
+        else:
+            self.post_btn.pack_forget()
+
+    def post_current(self) -> None:
+        """Post the current pick to Discord off the UI thread; on failure the button becomes Retry Post."""
+        if not self.post_message:
+            return
         url = self.config["webhook_url"]
-        self.clear_failed_post()
+        if not url:
+            messagebox.showerror("Post To Discord", "No Discord webhook URL is set. Add one in Settings.")
+            return
+        message, request = self.post_message, self.post_request
+        self.post_btn.state(["disabled"])
         self.set_status("Posting to Discord...")
 
         def worker():
@@ -1147,23 +1177,15 @@ class App:
 
         def done(ok, status):
             self.set_status(status)
-            if not ok:
-                self.failed_post = message
-                self.retry_post_btn.pack(side="right", padx=px(4), pady=px(2))
+            if request != self.post_request:
+                return  # a new album was picked meanwhile
+            if ok:
+                self.post_btn.configure(text="Posted to Discord ✓")
+            else:
+                self.post_btn.configure(text="Retry Post")
+                self.post_btn.state(["!disabled"])
 
         threading.Thread(target=worker, daemon=True).start()
-
-    def retry_post(self) -> None:
-        if not self.failed_post:
-            return
-        if not self.config["webhook_url"]:
-            messagebox.showerror("Retry Discord post", "No Discord webhook URL is set. Add one in Settings.")
-            return
-        self.send_post(self.failed_post)
-
-    def clear_failed_post(self) -> None:
-        self.failed_post = None
-        self.retry_post_btn.pack_forget()
 
     def show_cover(self, artist: str, album: str) -> None:
         """Clear the cover, then load the album's cover image (if any) off the UI thread."""
