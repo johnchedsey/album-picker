@@ -137,6 +137,23 @@ def append_history(path: Path, rows: list[list[str]]) -> None:
         writer.writerows(rows)
 
 
+def remove_history_row(path: Path, row: list[str]) -> None:
+    """Drop the last history line equal to row (used by Undo pick)."""
+    rows = read_rows(path)
+    for i in range(len(rows) - 1, -1, -1):
+        if rows[i] == row:
+            del rows[i]
+            break
+    else:
+        return
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f, quoting=csv.QUOTE_ALL)
+        writer.writerow(HISTORY_HEADER)
+        writer.writerows(rows)
+    tmp.replace(path)
+
+
 def album_key(row: list[str]) -> tuple[str, str]:
     return (row[0], row[1])
 
@@ -892,6 +909,11 @@ class App:
             menu.add_command(label=label, command=lambda k=kind: self.shortlist_pick(k))
         self.shortlist_btn["menu"] = menu
         ttk.Button(btns, text="⚙  Settings", command=self.open_settings).pack(side="right", ipady=px(6))
+        # Small, and kept away from Random Pick: puts the last pick back in the queue.
+        self.undo_btn = ttk.Button(btns, text="↶ Undo pick", command=self.undo_pick)
+        self.undo_btn.pack(side="right", padx=(0, px(8)))
+        self.undo_btn.state(["disabled"])
+        self.last_pick = None  # (queue index, queue row, played.csv row) of the pick Undo would revert
 
         # Queue count, then the queue CSV's file name as a link: click opens it with the
         # default program, right-click offers "Open with…" and "Show in folder".
@@ -1045,7 +1067,7 @@ class App:
             messagebox.showinfo("Pick", "No albums left in the queue!\nUse “Refresh Library” to add some.")
             return
 
-        self.commit_pick(queue, queue.pop(random.randrange(len(queue))))
+        self.commit_pick(queue, random.randrange(len(queue)))
 
     def read_queue_for_pick(self, title: str) -> list[list[str]] | None:
         """The queue rows, or None (after telling the user) if it can't be read or is empty."""
@@ -1075,7 +1097,7 @@ class App:
             messagebox.showerror(title, "That album is no longer in the queue.")
             self.refresh()
             return
-        self.commit_pick(queue, queue.pop(index))
+        self.commit_pick(queue, index)
 
     def manual_pick(self) -> None:
         queue = self.read_queue_for_pick("Manually pick")
@@ -1125,15 +1147,19 @@ class App:
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def commit_pick(self, remaining: list[list[str]], row: list[str]) -> None:
-        """Save the queue without the picked row, log it, and show it with a Post To Discord button."""
+    def commit_pick(self, queue: list[list[str]], index: int) -> None:
+        """Remove queue[index] from the saved queue, log it, and show it with a Post To Discord button."""
+        row = queue.pop(index)
         artist, album, created = row[:3]
+        logged = [artist, album, created, datetime.now().strftime(DATE_FMT), "played"]
         try:
-            write_queue(self.csv_path, remaining)
-            append_history(self.history_path, [[artist, album, created, datetime.now().strftime(DATE_FMT), "played"]])
+            write_queue(self.csv_path, queue)
+            append_history(self.history_path, [logged])
         except OSError as e:
             messagebox.showerror("Pick", f"Could not update the queue:\n{e}")
             return
+        self.last_pick = (index, row, logged)
+        self.undo_btn.state(["!disabled"])
 
         self.artist_var.set(display_artist(artist))
         self.album_var.set(album)
@@ -1151,6 +1177,41 @@ class App:
         self.post_btn.state(["!disabled"])
         self.update_post_button()
         self.set_status(f"Picked {display_artist(artist)} — {album}.")
+
+    def undo_pick(self) -> None:
+        """Put the last pick back where it was in the queue and drop its played.csv entry."""
+        if not self.last_pick:
+            return
+        index, row, logged = self.last_pick
+        name = f"{display_artist(row[0])} — {row[1]}"
+        if not messagebox.askyesno("Undo pick", f"Put {name} back in the queue?"):
+            return
+        try:
+            queue = read_rows(self.csv_path)  # re-read in case it changed since the pick
+            if album_key(row) not in {album_key(r) for r in queue}:
+                queue.insert(min(index, len(queue)), row)
+                write_queue(self.csv_path, queue)
+            remove_history_row(self.history_path, logged)
+        except (OSError, csv.Error) as e:
+            messagebox.showerror("Undo pick", f"Could not update the queue:\n{e}")
+            return
+        self.last_pick = None
+        self.undo_btn.state(["disabled"])
+
+        self.artist_var.set("—")
+        self.album_var.set("Press “Random Pick!” to choose")
+        self.added_var.set("")
+        self.length_request += 1  # ignore a length still being totalled
+        self.length_var.set("")
+        self.cover_request += 1  # ignore a cover still loading
+        self.cover_image = None
+        self.cover_label.configure(image="")
+        self.cover_size_var.set("")
+        self.post_message = None
+        self.post_request += 1  # ignore a post still running
+        self.update_post_button()
+        self.refresh()
+        self.set_status(f"Put {name} back in the queue.")
 
     def update_post_button(self) -> None:
         """Show the Post To Discord button only once something is picked and posting is on."""
