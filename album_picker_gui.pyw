@@ -59,6 +59,7 @@ DEFAULT_CONFIG = {
     "csv_path": str(APP_DIR / "albums.csv"),
     "webhook_url": "",
     "post_to_discord": True,
+    "auto_post": False,  # post each pick to Discord as soon as it is made
     "recent_count": RECENT_COUNT,
     "window_size": "",  # "WxH" in screen pixels, remembered between runs
     "window_zoomed": False,
@@ -425,6 +426,7 @@ class SettingsDialog(tk.Toplevel):
         self.csv_path = tk.StringVar(value=config["csv_path"])
         self.webhook = tk.StringVar(value=config["webhook_url"])
         self.post = tk.BooleanVar(value=config["post_to_discord"])
+        self.auto_post = tk.BooleanVar(value=config.get("auto_post", False))
         self.recent_count = tk.StringVar(value=str(config.get("recent_count", RECENT_COUNT)))
         self.history = tk.StringVar()
         self.csv_path.trace_add("write", lambda *_: self.update_history_path())
@@ -459,17 +461,40 @@ class SettingsDialog(tk.Toplevel):
         ttk.Label(frm, text="Discord webhook URL:").grid(row=4, column=0, sticky="w", pady=px(4))
         ttk.Entry(frm, textvariable=self.webhook, width=60, show="•").grid(row=4, column=1, sticky="ew", padx=px(6))
 
-        ttk.Checkbutton(frm, text="Show “Post To Discord” button", variable=self.post).grid(
-            row=5, column=1, sticky="w", pady=px(4), padx=px(6))
+        self.post_check = ttk.Checkbutton(frm, text="Show “Post To Discord” button", variable=self.post)
+        self.post_check.grid(row=5, column=1, sticky="w", pady=px(4), padx=px(6))
+        # Unticking auto-post brings the Post To Discord button back (command only fires on a click).
+        self.auto_post_check = ttk.Checkbutton(
+            frm, text="Automatically post to Discord", variable=self.auto_post,
+            command=lambda: self.auto_post.get() or self.post.set(True))
+        self.auto_post_check.grid(row=6, column=1, sticky="w", pady=px(4), padx=px(6))
+        self.webhook.trace_add("write", lambda *_: self.update_discord_options())
+        self.auto_post.trace_add("write", lambda *_: self.update_discord_options())
+        self.update_discord_options()
 
         btns = ttk.Frame(frm)
-        btns.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(px(10), 0))
+        btns.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(px(10), 0))
         ttk.Button(btns, text="Rebuild queue…", command=self.on_rebuild).pack(side="left")
         ttk.Button(btns, text="Save", command=self.on_save).pack(side="right", padx=px(4))
         ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="right")
 
         self.bind("<Escape>", lambda e: self.destroy())
         self.grab_set()
+
+    def update_discord_options(self):
+        """Without a webhook neither Discord option applies; auto-post makes the button redundant."""
+        if not self.webhook.get().strip():
+            self.post.set(False)
+            self.auto_post.set(False)
+            self.post_check.state(["disabled"])
+            self.auto_post_check.state(["disabled"])
+            return
+        self.auto_post_check.state(["!disabled"])
+        if self.auto_post.get():
+            self.post.set(False)
+            self.post_check.state(["disabled"])
+        else:
+            self.post_check.state(["!disabled"])
 
     def update_history_path(self):
         csv_path = self.csv_path.get().strip()
@@ -509,6 +534,7 @@ class SettingsDialog(tk.Toplevel):
             "csv_path": self.csv_path.get().strip(),
             "webhook_url": self.webhook.get().strip(),
             "post_to_discord": self.post.get(),
+            "auto_post": self.auto_post.get(),
             "recent_count": recent_count,
         }
         self.destroy()
@@ -887,9 +913,11 @@ class App:
         ttk.Label(text, textvariable=self.added_var, foreground="gray").pack(anchor="w", pady=(px(4), 0))
         ttk.Label(text, textvariable=self.length_var, foreground="gray").pack(anchor="w")
         # Shown after a pick (if Discord posting is on); becomes "Retry Post" if the post fails.
+        # With auto-post on it only appears once a post has failed.
         self.post_btn = ttk.Button(text, text="Post To Discord", command=self.post_current)
         self.post_message = None  # Discord message for the current pick
         self.post_request = 0
+        self.post_failed = False  # a post of the current pick has failed
 
         # Buttons
         btns = ttk.Frame(frm)
@@ -1173,10 +1201,13 @@ class App:
 
         self.post_message = f"💿 Up Next: **{display_artist(artist)}** — *{album}*"
         self.post_request += 1  # ignore results of a post still running for the previous pick
+        self.post_failed = False
         self.post_btn.configure(text="Post To Discord")
         self.post_btn.state(["!disabled"])
         self.update_post_button()
         self.set_status(f"Picked {display_artist(artist)} — {album}.")
+        if self.config.get("auto_post") and self.config["webhook_url"]:
+            self.post_current()
 
     def undo_pick(self) -> None:
         """Put the last pick back where it was in the queue and drop its played.csv entry."""
@@ -1209,13 +1240,21 @@ class App:
         self.cover_size_var.set("")
         self.post_message = None
         self.post_request += 1  # ignore a post still running
+        self.post_failed = False
         self.update_post_button()
         self.refresh()
         self.set_status(f"Put {name} back in the queue.")
 
     def update_post_button(self) -> None:
-        """Show the Post To Discord button only once something is picked and posting is on."""
-        if self.post_message and self.config["post_to_discord"]:
+        """Show the Post To Discord button once something is picked and posting is on.
+
+        With auto-post on, the button only appears (as Retry Post) after the automatic post fails.
+        """
+        if self.config.get("auto_post"):
+            wanted = self.post_failed
+        else:
+            wanted = self.config["post_to_discord"]
+        if self.post_message and self.config["webhook_url"] and wanted:
             self.post_btn.pack(anchor="w", pady=(px(8), 0), ipadx=px(4))
         else:
             self.post_btn.pack_forget()
@@ -1243,8 +1282,10 @@ class App:
             if ok:
                 self.post_btn.configure(text="Posted to Discord ✓")
             else:
+                self.post_failed = True
                 self.post_btn.configure(text="Retry Post")
                 self.post_btn.state(["!disabled"])
+                self.update_post_button()
 
         threading.Thread(target=worker, daemon=True).start()
 
