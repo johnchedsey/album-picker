@@ -276,6 +276,10 @@ def display_album(name: str) -> str:
     return re.sub(r"\s{2,}", " ", re.sub(r"\[flac\]", "", name, flags=re.IGNORECASE)).strip() or name
 
 
+def discord_message(artist: str, album: str) -> str:
+    return f"💿 Up Next: **{display_artist(artist)}** — *{display_album(album)}*"
+
+
 def time_since(date_str: str) -> str:
     added = datetime.strptime(date_str, DATE_FMT)
     now = datetime.now()
@@ -924,6 +928,8 @@ class App:
         self.post_message = None  # Discord message for the current pick
         self.post_request = 0
         self.post_failed = False  # a post of the current pick has failed
+        self.posted = False  # the current pick has been posted
+        self.shown = None  # (artist, album, created) on the Up next card
 
         # Buttons
         btns = ttk.Frame(frm)
@@ -947,7 +953,8 @@ class App:
         self.undo_btn = ttk.Button(btns, text="↶ Undo pick", command=self.undo_pick)
         self.undo_btn.pack(side="right", padx=(0, px(8)))
         self.undo_btn.state(["disabled"])
-        self.last_pick = None  # (queue index, queue row, played.csv row) of the pick Undo would revert
+        # (queue index, queue row, played.csv row, card state before it) of the pick Undo would revert
+        self.last_pick = None
 
         # Queue count, then the queue CSV's file name as a link: click opens it with the
         # default program, right-click offers "Open with…" and "Show in folder".
@@ -986,6 +993,9 @@ class App:
         self.tree.bind("<End>", lambda e: self.select_recent(-1))
         self.tree.bind("<Prior>", lambda e: self.tree.yview_scroll(-1, "pages"))
         self.tree.bind("<Next>", lambda e: self.tree.yview_scroll(1, "pages"))
+        self.tree.bind("<Button-3>", self.show_recent_menu)
+        self.recent_menu = tk.Menu(root, tearoff=False)
+        self.recent_menu.add_command(label="Post to Discord…", command=self.post_recent)
 
         self.refresh()
         if not self.config["library_dir"]:
@@ -1076,6 +1086,39 @@ class App:
             self.tree.focus(item)
             self.tree.see(item)
         return "break"
+
+    def show_recent_menu(self, event: tk.Event) -> None:
+        item = self.tree.identify_row(event.y)
+        if not item:
+            return
+        self.tree.selection_set(item)
+        self.tree.focus(item)
+        state = "normal" if self.config["webhook_url"] else "disabled"
+        self.recent_menu.entryconfigure(0, state=state)
+        try:
+            self.recent_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.recent_menu.grab_release()
+
+    def post_recent(self) -> None:
+        """Post the selected Recent picks row to Discord (e.g. one that was never posted)."""
+        selection = self.tree.selection()
+        url = self.config["webhook_url"]
+        if not selection or not url:
+            return
+        # str(): Tk hands back number-like values (e.g. an album called "1999") as ints
+        _picked, artist, album, _added = map(str, self.tree.item(selection[0], "values"))
+        name = f"{display_artist(artist)} — {album}"
+        if not messagebox.askyesno("Post to Discord", f"Post {name} to Discord?"):
+            return
+        message = discord_message(artist, album)
+        self.set_status("Posting to Discord...")
+
+        def worker():
+            ok, status = post_to_discord(url, message)
+            self.root.after(0, self.set_status, status)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     # Settings
     def open_settings(self) -> None:
@@ -1192,9 +1235,21 @@ class App:
         except OSError as e:
             messagebox.showerror("Pick", f"Could not update the queue:\n{e}")
             return
-        self.last_pick = (index, row, logged)
+        # Undo puts the previous pick back on the card, so an unposted one can still be posted.
+        previous = (*self.shown, self.posted, self.post_failed) if self.shown else None
+        self.last_pick = (index, row, logged, previous)
         self.undo_btn.state(["!disabled"])
 
+        self.show_pick(artist, album, created)
+        self.refresh()
+        self.set_status(f"Picked {display_artist(artist)} — {album}.")
+        if self.config.get("auto_post") and self.config["webhook_url"]:
+            self.post_current()
+
+    def show_pick(self, artist: str, album: str, created: str,
+                  posted: bool = False, failed: bool = False) -> None:
+        """Show an album on the Up next card, with its Post To Discord button in the given state."""
+        self.shown = (artist, album, created)
         self.artist_var.set(display_artist(artist))
         self.album_var.set(album)
         try:
@@ -1203,23 +1258,24 @@ class App:
             self.added_var.set(f"Added {short_time(created)}")
         self.show_cover(artist, album)
         self.show_length(artist, album)
-        self.refresh()
 
-        self.post_message = f"💿 Up Next: **{display_artist(artist)}** — *{display_album(album)}*"
+        self.post_message = discord_message(artist, album)
         self.post_request += 1  # ignore results of a post still running for the previous pick
-        self.post_failed = False
-        self.post_btn.configure(text="Post To Discord")
-        self.post_btn.state(["!disabled"])
+        self.post_failed = failed
+        self.posted = posted
+        if posted:
+            self.post_btn.configure(text="Posted to Discord ✓")
+            self.post_btn.state(["disabled"])
+        else:
+            self.post_btn.configure(text="Retry Post" if failed else "Post To Discord")
+            self.post_btn.state(["!disabled"])
         self.update_post_button()
-        self.set_status(f"Picked {display_artist(artist)} — {album}.")
-        if self.config.get("auto_post") and self.config["webhook_url"]:
-            self.post_current()
 
     def undo_pick(self) -> None:
         """Put the last pick back where it was in the queue and drop its played.csv entry."""
         if not self.last_pick:
             return
-        index, row, logged = self.last_pick
+        index, row, logged, previous = self.last_pick
         name = f"{display_artist(row[0])} — {row[1]}"
         if not messagebox.askyesno("Undo pick", f"Put {name} back in the queue?"):
             return
@@ -1234,7 +1290,14 @@ class App:
             return
         self.last_pick = None
         self.undo_btn.state(["disabled"])
+        self.refresh()
+        self.set_status(f"Put {name} back in the queue.")
+        if previous:
+            self.show_pick(*previous)
+            return
 
+        self.shown = None
+        self.posted = False
         self.artist_var.set("—")
         self.album_var.set("Press “Random Pick!” to choose")
         self.added_var.set("")
@@ -1248,8 +1311,6 @@ class App:
         self.post_request += 1  # ignore a post still running
         self.post_failed = False
         self.update_post_button()
-        self.refresh()
-        self.set_status(f"Put {name} back in the queue.")
 
     def update_post_button(self) -> None:
         """Show the Post To Discord button once something is picked and posting is on.
@@ -1286,6 +1347,7 @@ class App:
             if request != self.post_request:
                 return  # a new album was picked meanwhile
             if ok:
+                self.posted = True
                 self.post_btn.configure(text="Posted to Discord ✓")
             else:
                 self.post_failed = True
