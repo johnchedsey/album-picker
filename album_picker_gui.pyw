@@ -18,6 +18,7 @@ import csv
 import json
 import os
 import random
+import re
 import subprocess
 import sys
 import threading
@@ -268,6 +269,11 @@ def display_artist(name: str) -> str:
     if name.lower().endswith(", the"):
         return "The " + name[:-5].rstrip()
     return name
+
+
+def display_album(name: str) -> str:
+    """Folder name -> Discord name: drop "[FLAC]" tags ("Abbey Road [FLAC]" -> "Abbey Road")."""
+    return re.sub(r"\s{2,}", " ", re.sub(r"\[flac\]", "", name, flags=re.IGNORECASE)).strip() or name
 
 
 def time_since(date_str: str) -> str:
@@ -1199,7 +1205,7 @@ class App:
         self.show_length(artist, album)
         self.refresh()
 
-        self.post_message = f"💿 Up Next: **{display_artist(artist)}** — *{album}*"
+        self.post_message = f"💿 Up Next: **{display_artist(artist)}** — *{display_album(album)}*"
         self.post_request += 1  # ignore results of a post still running for the previous pick
         self.post_failed = False
         self.post_btn.configure(text="Post To Discord")

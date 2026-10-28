@@ -8,6 +8,7 @@ Usage: python3 pick_album.py
 
 import csv
 import random
+import re
 import urllib.request
 import urllib.error
 import json
@@ -55,6 +56,11 @@ def display_artist(name):
     return name
 
 
+def display_album(name):
+    """Folder name -> Discord name: drop "[FLAC]" tags ("Abbey Road [FLAC]" -> "Abbey Road")."""
+    return re.sub(r"\s{2,}", " ", re.sub(r"\[flac\]", "", name, flags=re.IGNORECASE)).strip() or name
+
+
 # --- Calculate time since added ---
 def time_since(date_str):
     added = datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S")
@@ -94,7 +100,7 @@ with open(CSV_PATH, 'w', newline='', encoding='utf-8') as f:
 print(f"{len(data)} albums remaining in queue.")
 
 # --- Post to Discord (with retry on 429) ---
-message = f"💿 Up Next: **{display_artist(artist)}** — *{album}*"
+message = f"💿 Up Next: **{display_artist(artist)}** — *{display_album(album)}*"
 payload = json.dumps({"content": message}).encode("utf-8")
 
 for attempt in range(1, MAX_RETRIES + 1):
