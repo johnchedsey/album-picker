@@ -28,6 +28,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 from tkinter import filedialog, font, messagebox, ttk
 
 from audiolength import AUDIO_EXTS, album_length, format_length
@@ -206,7 +207,8 @@ def scan_library(root: Path, cancel: threading.Event | None = None) -> tuple[lis
 
 def folder_size(path: Path) -> int:
     """Total size in bytes of the files under path (scandir reuses directory listings, so this is quick)."""
-    total, pending = 0, [path]
+    total = 0
+    pending: list[str | Path] = [path]
     while pending:
         with os.scandir(pending.pop()) as entries:
             for entry in entries:
@@ -220,7 +222,7 @@ def folder_size(path: Path) -> int:
 def audio_check(path: Path) -> str | None:
     """None if the folder holds at least one audio file, else a short note on what it does hold."""
     files = size = 0
-    pending = [path]
+    pending: list[str | Path] = [path]
     while pending:
         with os.scandir(pending.pop()) as entries:
             for entry in entries:
@@ -722,6 +724,13 @@ class SyncDialog(tk.Toplevel):
 class PickListMixin:
     """Select/double-click handling for a dialog with self.tree, self.select_btn and self.matches."""
 
+    # Provided by the dialog class (and tk.Toplevel); declared here for the type checker.
+    tree: ttk.Treeview
+    select_btn: ttk.Button
+    matches: list[list[str]]
+    result: list[str] | None
+    destroy: Callable[[], None]
+
     def update_select_button(self) -> None:
         self.select_btn.state(["!disabled"] if self.tree.selection() else ["disabled"])
 
@@ -1158,7 +1167,7 @@ class App:
             return None
         return queue
 
-    def pick_chosen(self, title: str, dlg: tk.Toplevel) -> None:
+    def pick_chosen(self, title: str, dlg: "ShortlistDialog | ManualPickDialog") -> None:
         """Wait for a pick dialog, then pick the album it returned (if it is still queued)."""
         self.root.wait_window(dlg)
         if not dlg.result:
