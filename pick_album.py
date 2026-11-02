@@ -57,8 +57,8 @@ def display_artist(name):
 
 
 def display_album(name):
-    """Folder name -> Discord name: drop "[FLAC]" tags ("Abbey Road [FLAC]" -> "Abbey Road")."""
-    return re.sub(r"\s{2,}", " ", re.sub(r"\[flac\]", "", name, flags=re.IGNORECASE)).strip() or name
+    """Folder name -> Discord name: drop "[FLAC]" / "{WEB - FLAC}" tags ("Abbey Road [FLAC]" -> "Abbey Road")."""
+    return re.sub(r"\s{2,}", " ", re.sub(r"\[flac\]|\{web\s*-\s*flac\}", "", name, flags=re.IGNORECASE)).strip() or name
 
 
 # --- Calculate time since added ---
