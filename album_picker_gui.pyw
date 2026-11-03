@@ -266,6 +266,17 @@ def short_time(date_str: str) -> str:
     return date_str[:16]
 
 
+def random_artist_oldest(rows: list[list[str]]) -> int:
+    """Index of the oldest album (by Created_Date) of a random artist; ties broken at random.
+
+    Duplicated in pick_album.py (PICK_MODE = "artist") — keep the two in sync.
+    """
+    artist = random.choice(sorted({r[0] for r in rows}))
+    mine = [i for i, r in enumerate(rows) if r[0] == artist]
+    oldest = min(rows[i][2] for i in mine)  # DATE_FMT sorts correctly as text
+    return random.choice([i for i in mine if rows[i][2] == oldest])
+
+
 def display_artist(name: str) -> str:
     """Folder name -> display name: "Barbarians of California, the" -> "The Barbarians of California"."""
     if name.lower().endswith(", the"):
@@ -947,6 +958,8 @@ class App:
         self.pick_btn.pack(side="left", ipadx=px(8), ipady=px(6))
         ttk.Button(btns, text="🔍  Manually pick", command=self.manual_pick).pack(
             side="left", padx=(px(8), 0), ipadx=px(8), ipady=px(6))
+        ttk.Button(btns, text="🎤  Random Artist!", command=self.artist_pick).pack(
+            side="left", padx=(px(8), 0), ipadx=px(8), ipady=px(6))
         self.update_btn = ttk.Button(btns, text="🔄  Refresh Library", command=self.update_from_library)
         self.update_btn.pack(side="left", padx=px(8), ipadx=px(8), ipady=px(6))
         self.scan_cancel = None  # threading.Event while a library scan is running
@@ -1184,6 +1197,12 @@ class App:
             self.refresh()
             return
         self.commit_pick(queue, index)
+
+    def artist_pick(self) -> None:
+        """Pick a random artist, then that artist's oldest queued album."""
+        queue = self.read_queue_for_pick("Random Artist")
+        if queue:
+            self.commit_pick(queue, random_artist_oldest(queue))
 
     def manual_pick(self) -> None:
         queue = self.read_queue_for_pick("Manually pick")

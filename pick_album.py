@@ -23,6 +23,9 @@ from envfile import WEBHOOK_KEY, get_env
 CSV_PATH = "albums.csv"  # path to your CSV file
 WEBHOOK_URL = get_env(WEBHOOK_KEY)  # from .env next to this script, or the environment
 MAX_RETRIES = 5
+# "album": any queued album, all equally likely.
+# "artist": a random artist (each equally likely), then their oldest queued album by Created_Date.
+PICK_MODE = "album"
 
 if not WEBHOOK_URL:
     print(f"Error: {WEBHOOK_KEY} is not set. Add it to .env (see .env.example).")
@@ -43,8 +46,22 @@ if not data:
     print("No albums left!")
     sys.exit(0)
 
-# --- Pick a random album ---
-idx = random.randint(0, len(data) - 1)
+# --- Pick an album ---
+def random_artist_oldest(rows):
+    """Index of the oldest album (by Created_Date) of a random artist; ties broken at random."""
+    artist = random.choice(sorted({r[0] for r in rows}))
+    mine = [i for i, r in enumerate(rows) if r[0] == artist]
+    oldest = min(rows[i][2] for i in mine)  # DATE_FMT sorts correctly as text
+    return random.choice([i for i in mine if rows[i][2] == oldest])
+
+
+if PICK_MODE == "artist":
+    idx = random_artist_oldest(data)
+elif PICK_MODE == "album":
+    idx = random.randint(0, len(data) - 1)
+else:
+    print(f'Error: PICK_MODE must be "album" or "artist", not {PICK_MODE!r}.')
+    sys.exit(1)
 picked = data.pop(idx)
 artist, album, date = picked
 
