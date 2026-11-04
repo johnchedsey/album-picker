@@ -26,6 +26,11 @@ MAX_RETRIES = 5
 # "album": any queued album, all equally likely.
 # "artist": a random artist (each equally likely), then their oldest queued album by Created_Date.
 PICK_MODE = "album"
+# "artist" mode options (same as the GUI's Settings → "Random Artist!" mode):
+ARTIST_WEIGHT = "equal"     # "equal", "count" (by number of queued albums) or "sqrt" (gentler)
+ARTIST_FAVOR_WAIT = False  # favor artists whose oldest queued album has waited longest
+ARTIST_SKIP_RECENT = 0      # skip artists of the last N picks in played.csv beside CSV_PATH (0 = off;
+                            # only the GUI writes played.csv, so CLI picks aren't counted)
 
 if not WEBHOOK_URL:
     print(f"Error: {WEBHOOK_KEY} is not set. Add it to .env (see .env.example).")
@@ -47,16 +52,56 @@ if not data:
     sys.exit(0)
 
 # --- Pick an album ---
-def random_artist_oldest(rows):
-    """Index of the oldest album (by Created_Date) of a random artist; ties broken at random."""
-    artist = random.choice(sorted({r[0] for r in rows}))
-    mine = [i for i, r in enumerate(rows) if r[0] == artist]
+DATE_FMT = "%Y-%m-%d %H:%M:%S"
+
+
+def recent_artists(history, count):
+    """Artist folders of the last `count` played picks in played.csv rows (skipped albums don't count)."""
+    if count <= 0:
+        return set()
+    played = [r[0] for r in history if len(r) > 4 and r[4] == "played"]
+    return set(played[-count:])
+
+
+def random_artist_oldest(rows, weight="equal", favor_wait=False, skip=frozenset()):
+    """Index of the oldest album (by Created_Date) of a random artist; ties broken at random.
+
+    weight: "equal" (every artist the same), "count" (in proportion to queued albums) or
+    "sqrt" (square root of queued albums). favor_wait multiplies that by the days the
+    artist's oldest queued album has waited. Artists in skip are left out, unless that
+    would leave none. Duplicated in album_picker_gui.pyw — keep in sync.
+    """
+    groups = {}
+    for i, r in enumerate(rows):
+        groups.setdefault(r[0], []).append(i)
+    pool = sorted(a for a in groups if a not in skip) or sorted(groups)
+    now = datetime.now()
+    weights = []
+    for artist in pool:
+        n = len(groups[artist])
+        w = {"count": n, "sqrt": n ** 0.5}.get(weight, 1.0)
+        if favor_wait:
+            oldest = min(rows[i][2] for i in groups[artist])
+            try:
+                w *= max((now - datetime.strptime(oldest, DATE_FMT)).total_seconds() / 86400, 0) + 1
+            except ValueError:
+                pass  # unreadable date: leave the weight as it is
+        weights.append(w)
+    mine = groups[random.choices(pool, weights)[0]]
     oldest = min(rows[i][2] for i in mine)  # DATE_FMT sorts correctly as text
     return random.choice([i for i in mine if rows[i][2] == oldest])
 
 
 if PICK_MODE == "artist":
-    idx = random_artist_oldest(data)
+    if ARTIST_WEIGHT not in ("equal", "count", "sqrt"):
+        print(f'Error: ARTIST_WEIGHT must be "equal", "count" or "sqrt", not {ARTIST_WEIGHT!r}.')
+        sys.exit(1)
+    skip = set()
+    history_file = os.path.join(os.path.dirname(CSV_PATH), "played.csv")
+    if ARTIST_SKIP_RECENT > 0 and os.path.exists(history_file):
+        with open(history_file, newline='', encoding='utf-8-sig') as f:
+            skip = recent_artists(list(csv.reader(f))[1:], ARTIST_SKIP_RECENT)
+    idx = random_artist_oldest(data, ARTIST_WEIGHT, ARTIST_FAVOR_WAIT, skip)
 elif PICK_MODE == "album":
     idx = random.randint(0, len(data) - 1)
 else:

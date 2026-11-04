@@ -63,6 +63,11 @@ DEFAULT_CONFIG = {
     "post_to_discord": True,
     "auto_post": False,  # post each pick to Discord as soon as it is made
     "recent_count": RECENT_COUNT,
+    # Random Artist! options (nothing on = every artist equally likely)
+    "artist_weight": "equal",  # "equal", "count" or "sqrt" (by number of queued albums)
+    "artist_favor_wait": False,  # favor artists whose oldest queued album has waited longest
+    "artist_skip_recent": False,  # leave out artists of the last artist_skip_count picks
+    "artist_skip_count": 10,
     "window_size": "",  # "WxH" in screen pixels, remembered between runs
     "window_zoomed": False,
     "recent_columns": {},  # Recent picks column widths in screen pixels, by column id
@@ -80,6 +85,8 @@ def load_config() -> dict:
             saved = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             pass
+    if "artist_favour_wait" in saved:  # renamed from the British spelling
+        saved.setdefault("artist_favor_wait", saved.pop("artist_favour_wait"))
     config.update(saved)
     # Older configs stored the webhook in the JSON; move it into .env.
     legacy_url = saved.get("webhook_url", "")
@@ -266,13 +273,40 @@ def short_time(date_str: str) -> str:
     return date_str[:16]
 
 
-def random_artist_oldest(rows: list[list[str]]) -> int:
+def recent_artists(history: list[list[str]], count: int) -> set[str]:
+    """Artist folders of the last `count` played picks in played.csv rows (skipped albums don't count)."""
+    if count <= 0:
+        return set()
+    played = [r[0] for r in history if len(r) > 4 and r[4] == "played"]
+    return set(played[-count:])
+
+
+def random_artist_oldest(rows: list[list[str]], weight: str = "equal", favor_wait: bool = False,
+                         skip: set[str] | frozenset[str] = frozenset()) -> int:
     """Index of the oldest album (by Created_Date) of a random artist; ties broken at random.
 
-    Duplicated in pick_album.py (PICK_MODE = "artist") — keep the two in sync.
+    weight: "equal" (every artist the same), "count" (in proportion to queued albums) or
+    "sqrt" (square root of queued albums). favor_wait multiplies that by the days the
+    artist's oldest queued album has waited. Artists in skip are left out, unless that
+    would leave none. Duplicated in pick_album.py (PICK_MODE = "artist") — keep in sync.
     """
-    artist = random.choice(sorted({r[0] for r in rows}))
-    mine = [i for i, r in enumerate(rows) if r[0] == artist]
+    groups: dict[str, list[int]] = {}
+    for i, r in enumerate(rows):
+        groups.setdefault(r[0], []).append(i)
+    pool = sorted(a for a in groups if a not in skip) or sorted(groups)
+    now = datetime.now()
+    weights = []
+    for artist in pool:
+        n = len(groups[artist])
+        w = {"count": n, "sqrt": n ** 0.5}.get(weight, 1.0)
+        if favor_wait:
+            oldest = min(rows[i][2] for i in groups[artist])
+            try:
+                w *= max((now - datetime.strptime(oldest, DATE_FMT)).total_seconds() / 86400, 0) + 1
+            except ValueError:
+                pass  # unreadable date: leave the weight as it is
+        weights.append(w)
+    mine = groups[random.choices(pool, weights)[0]]
     oldest = min(rows[i][2] for i in mine)  # DATE_FMT sorts correctly as text
     return random.choice([i for i in mine if rows[i][2] == oldest])
 
@@ -495,8 +529,42 @@ class SettingsDialog(tk.Toplevel):
         self.auto_post.trace_add("write", lambda *_: self.update_discord_options())
         self.update_discord_options()
 
+        # Random Artist! options. The two album-count weightings contradict each other, so ticking
+        # one greys out the other; the wait and skip-recent options combine with anything.
+        weight = config.get("artist_weight", "equal")
+        self.weight_count = tk.BooleanVar(value=weight == "count")
+        self.weight_sqrt = tk.BooleanVar(value=weight == "sqrt")
+        self.favor_wait = tk.BooleanVar(value=config.get("artist_favor_wait", False))
+        self.skip_recent = tk.BooleanVar(value=config.get("artist_skip_recent", False))
+        self.skip_count = tk.StringVar(value=str(config.get("artist_skip_count", 10)))
+        artist = ttk.LabelFrame(frm, text="“Random Artist!” mode", padding=px(8))
+        artist.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(px(10), 0))
+        ttk.Label(artist, foreground="gray", wraplength=px(560), justify="left",
+                  text="Always plays the chosen artist's oldest queued album. With nothing ticked, "
+                       "every artist has the same chance.").pack(anchor="w", pady=(0, px(4)))
+        self.weight_count_check = ttk.Checkbutton(
+            artist, text="Favor artists with more queued albums (in proportion)",
+            variable=self.weight_count, command=self.update_artist_options)
+        self.weight_count_check.pack(anchor="w", pady=px(2))
+        self.weight_sqrt_check = ttk.Checkbutton(
+            artist, text="Favor artists with more queued albums, gently (square root)",
+            variable=self.weight_sqrt, command=self.update_artist_options)
+        self.weight_sqrt_check.pack(anchor="w", pady=px(2))
+        self.weight_note = ttk.Label(artist, foreground="gray")
+        self.weight_note.pack(anchor="w", padx=(px(22), 0))
+        ttk.Checkbutton(artist, text="Favor artists whose oldest queued album has waited longest",
+                        variable=self.favor_wait).pack(anchor="w", pady=px(2))
+        skip_row = ttk.Frame(artist)
+        skip_row.pack(anchor="w", pady=px(2))
+        ttk.Checkbutton(skip_row, text="Skip artists picked in the last", variable=self.skip_recent,
+                        command=self.update_artist_options).pack(side="left")
+        self.skip_spin = ttk.Spinbox(skip_row, textvariable=self.skip_count, from_=1, to=1000, width=6)
+        self.skip_spin.pack(side="left", padx=px(4))
+        ttk.Label(skip_row, text="picks (everyone is allowed if that skips all)").pack(side="left")
+        self.update_artist_options()
+
         btns = ttk.Frame(frm)
-        btns.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(px(10), 0))
+        btns.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(px(10), 0))
         ttk.Button(btns, text="Rebuild queue…", command=self.on_rebuild).pack(side="left")
         ttk.Button(btns, text="Save", command=self.on_save).pack(side="right", padx=px(4))
         ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="right")
@@ -518,6 +586,17 @@ class SettingsDialog(tk.Toplevel):
             self.post_check.state(["disabled"])
         else:
             self.post_check.state(["!disabled"])
+
+    def update_artist_options(self):
+        """Grey out whichever album-count weighting contradicts the ticked one, and the unused skip count."""
+        if self.weight_count.get() and self.weight_sqrt.get():  # a config can't say both, but be safe
+            self.weight_sqrt.set(False)
+        for check, other in ((self.weight_count_check, self.weight_sqrt),
+                             (self.weight_sqrt_check, self.weight_count)):
+            check.state(["disabled"] if other.get() else ["!disabled"])
+        self.weight_note["text"] = ("The two “more queued albums” options can't be combined; untick one to use the other."
+                                    if self.weight_count.get() or self.weight_sqrt.get() else "")
+        self.skip_spin.state(["!disabled"] if self.skip_recent.get() else ["disabled"])
 
     def update_history_path(self):
         csv_path = self.csv_path.get().strip()
@@ -552,6 +631,16 @@ class SettingsDialog(tk.Toplevel):
         except ValueError:
             messagebox.showerror("Settings", "Recent picks to show must be a whole number (0 = all).", parent=self)
             return
+        try:
+            skip_count = int(self.skip_count.get().strip())
+            if skip_count < 1:
+                raise ValueError
+        except ValueError:
+            if self.skip_recent.get():
+                messagebox.showerror("Settings", "The number of picks to skip artists from must be "
+                                     "a whole number of at least 1.", parent=self)
+                return
+            skip_count = 10  # option is off; keep a sane value for when it's turned on
         self.result = {
             "library_dir": self.library.get().strip(),
             "csv_path": self.csv_path.get().strip(),
@@ -559,6 +648,10 @@ class SettingsDialog(tk.Toplevel):
             "post_to_discord": self.post.get(),
             "auto_post": self.auto_post.get(),
             "recent_count": recent_count,
+            "artist_weight": "count" if self.weight_count.get() else "sqrt" if self.weight_sqrt.get() else "equal",
+            "artist_favor_wait": self.favor_wait.get(),
+            "artist_skip_recent": self.skip_recent.get(),
+            "artist_skip_count": skip_count,
         }
         self.destroy()
 
@@ -1201,8 +1294,16 @@ class App:
     def artist_pick(self) -> None:
         """Pick a random artist, then that artist's oldest queued album."""
         queue = self.read_queue_for_pick("Random Artist")
-        if queue:
-            self.commit_pick(queue, random_artist_oldest(queue))
+        if not queue:
+            return
+        skip: set[str] = set()
+        if self.config.get("artist_skip_recent"):
+            try:
+                skip = recent_artists(read_rows(self.history_path), int(self.config.get("artist_skip_count", 10)))
+            except (OSError, csv.Error, ValueError):
+                pass  # no usable history: don't skip anyone
+        self.commit_pick(queue, random_artist_oldest(
+            queue, self.config.get("artist_weight", "equal"), bool(self.config.get("artist_favor_wait")), skip))
 
     def manual_pick(self) -> None:
         queue = self.read_queue_for_pick("Manually pick")
