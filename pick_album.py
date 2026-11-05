@@ -26,9 +26,10 @@ MAX_RETRIES = 5
 # "album": any queued album, all equally likely.
 # "artist": a random artist (each equally likely), then their oldest queued album by Created_Date.
 PICK_MODE = "album"
-# "artist" mode options (same as the GUI's Settings → "Random Artist!" mode):
+# Options as in the GUI's Settings → "Random pick mode". "artist" mode only:
 ARTIST_WEIGHT = "equal"     # "equal", "count" (by number of queued albums) or "sqrt" (gentler)
 ARTIST_FAVOR_WAIT = False  # favor artists whose oldest queued album has waited longest
+# Both modes:
 ARTIST_SKIP_RECENT = 0      # skip artists of the last N picks in played.csv beside CSV_PATH (0 = off;
                             # only the GUI writes played.csv, so CLI picks aren't counted)
 
@@ -63,6 +64,15 @@ def recent_artists(history, count):
     return set(played[-count:])
 
 
+def random_album(rows, skip=frozenset()):
+    """Index of any row at random, leaving out artists in skip unless that would leave none.
+
+    Duplicated in album_picker_gui.pyw — keep in sync.
+    """
+    pool = [i for i, r in enumerate(rows) if r[0] not in skip] or list(range(len(rows)))
+    return random.choice(pool)
+
+
 def random_artist_oldest(rows, weight="equal", favor_wait=False, skip=frozenset()):
     """Index of the oldest album (by Created_Date) of a random artist; ties broken at random.
 
@@ -92,21 +102,21 @@ def random_artist_oldest(rows, weight="equal", favor_wait=False, skip=frozenset(
     return random.choice([i for i in mine if rows[i][2] == oldest])
 
 
-if PICK_MODE == "artist":
-    if ARTIST_WEIGHT not in ("equal", "count", "sqrt"):
-        print(f'Error: ARTIST_WEIGHT must be "equal", "count" or "sqrt", not {ARTIST_WEIGHT!r}.')
-        sys.exit(1)
-    skip = set()
-    history_file = os.path.join(os.path.dirname(CSV_PATH), "played.csv")
-    if ARTIST_SKIP_RECENT > 0 and os.path.exists(history_file):
-        with open(history_file, newline='', encoding='utf-8-sig') as f:
-            skip = recent_artists(list(csv.reader(f))[1:], ARTIST_SKIP_RECENT)
-    idx = random_artist_oldest(data, ARTIST_WEIGHT, ARTIST_FAVOR_WAIT, skip)
-elif PICK_MODE == "album":
-    idx = random.randint(0, len(data) - 1)
-else:
+if PICK_MODE not in ("album", "artist"):
     print(f'Error: PICK_MODE must be "album" or "artist", not {PICK_MODE!r}.')
     sys.exit(1)
+if ARTIST_WEIGHT not in ("equal", "count", "sqrt"):
+    print(f'Error: ARTIST_WEIGHT must be "equal", "count" or "sqrt", not {ARTIST_WEIGHT!r}.')
+    sys.exit(1)
+skip = set()
+history_file = os.path.join(os.path.dirname(CSV_PATH), "played.csv")
+if ARTIST_SKIP_RECENT > 0 and os.path.exists(history_file):
+    with open(history_file, newline='', encoding='utf-8-sig') as f:
+        skip = recent_artists(list(csv.reader(f))[1:], ARTIST_SKIP_RECENT)
+if PICK_MODE == "artist":
+    idx = random_artist_oldest(data, ARTIST_WEIGHT, ARTIST_FAVOR_WAIT, skip)
+else:
+    idx = random_album(data, skip)
 picked = data.pop(idx)
 artist, album, date = picked
 
