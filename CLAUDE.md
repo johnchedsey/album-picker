@@ -26,6 +26,10 @@ python3 pick_album.py
 - `pick_album.py` is a top-level script (no `main()`), so importing it runs it and mutates `albums.csv`. Back up the CSV before experimenting.
 - Config (`CSV_PATH`, `MAX_RETRIES`) is set as constants at the top of `pick_album.py`. The Discord webhook URL is a secret: it lives only in a git-ignored `.env` next to the scripts (`DISCORD_WEBHOOK_URL=...`, template in `.env.example`), read via `envfile.py`; a real environment variable of the same name overrides it. Never hard-code the URL or put it in any committed file.
 
+## Versioning
+
+`__version__` in `version.py` is the single source of truth (semver, `MAJOR.MINOR.PATCH`). It's shown in the GUI title bar and Settings, by `pick_album.py --version`, and in the exe's file properties (`build_exe.py` writes a PyInstaller version file). **Every commit that changes a `.py`/`.pyw` file (other than `build_exe.py`) must bump it in the same commit**: PATCH for fixes/tweaks, MINOR for new features or settings (resets PATCH), MAJOR only for breaking CSV/config format changes. The `.githooks/pre-commit` hook enforces this and `.githooks/post-commit` tags the commit `vX.Y.Z` (needs `git config core.hooksPath .githooks`; `push.followTags` pushes the tags). Docs-only commits don't bump.
+
 ## Windows GUI (`album_picker_gui.pyw`)
 
 Build a single-file `AlbumPicker.exe` with `python build_exe.py` (needs `pip install pyinstaller`; uses `album_picker.ico`). The exe is copied to the project root and looks for `.env` and `album_picker_config.json` beside itself, so it must stay next to them. Rebuild after any code change.

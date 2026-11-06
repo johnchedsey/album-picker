@@ -1,0 +1,25 @@
+#!/bin/sh
+# Refuse a commit that changes app code without bumping version.py,
+# or that sets a version that is not higher than the last commit's.
+# Enable once per clone:  git config core.hooksPath .githooks
+
+get_version() { tr -d '\r' | sed -n 's/^__version__ = "\(.*\)"/\1/p'; }
+
+changed=$(git diff --cached --name-only --diff-filter=ACMRD)
+code=$(printf '%s\n' "$changed" | grep -E '\.pyw?$' | grep -vE '^(version|build_exe)\.py$')
+[ -z "$code" ] && exit 0
+
+new=$(git show :version.py 2>/dev/null | get_version)
+old=$(git show HEAD:version.py 2>/dev/null | get_version)
+
+if [ -z "$new" ]; then
+    echo "pre-commit: app code changed but version.py has no __version__ line staged." >&2
+    exit 1
+fi
+if [ -n "$old" ] && { [ "$new" = "$old" ] || [ "$(printf '%s\n%s\n' "$old" "$new" | sort -V | tail -n1)" != "$new" ]; }; then
+    echo "pre-commit: app code changed but version.py is still $old (staged: $new)." >&2
+    echo "  Bump __version__ in version.py: PATCH for fixes, MINOR for features." >&2
+    echo "  (git commit --no-verify skips this check.)" >&2
+    exit 1
+fi
+exit 0

@@ -73,6 +73,25 @@ python build_exe.py
 
 This builds `AlbumPicker.exe` in the project folder. The exe looks for `.env` and `album_picker_config.json` in the folder it runs from, so keep it next to them.
 
+The exe's version (from `version.py`) shows in its Properties → Details tab.
+
+## Versioning
+
+Album Picker uses [semantic versioning](https://semver.org/), `MAJOR.MINOR.PATCH`, kept in one place: `__version__` in `version.py`. The GUI shows it in its title bar and in Settings, and `python pick_album.py --version` prints it.
+
+- **PATCH** (0.5.0 → 0.5.1): bug fixes and small tweaks that add nothing new
+- **MINOR** (0.5.1 → 0.6.0): new features or settings; PATCH goes back to 0
+- **MAJOR** (0.x → 1.0.0): changes that break existing `albums.csv` / `played.csv` / config files. It stays at 0 until the app is considered stable.
+
+Every commit that changes app code bumps the version, and each new version is tagged `vX.Y.Z`. Two git hooks in `.githooks/` do the checking and tagging; turn them on once per clone:
+
+```bash
+git config core.hooksPath .githooks   # pre-commit: refuse code changes without a version bump
+git config push.followTags true       # post-commit tags vX.Y.Z; this pushes the tags too
+```
+
+Docs-only commits (README, CLAUDE.md, etc.) don't need a bump.
+
 ## License
 
 [MIT](LICENSE)

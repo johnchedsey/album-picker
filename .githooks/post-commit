@@ -1,0 +1,8 @@
+#!/bin/sh
+# Tag the commit vX.Y.Z when it introduces a new version in version.py.
+# Annotated tags go out with a normal push when push.followTags is on:
+#   git config push.followTags true
+v=$(git show HEAD:version.py 2>/dev/null | tr -d '\r' | sed -n 's/^__version__ = "\(.*\)"/\1/p')
+[ -z "$v" ] && exit 0
+git rev-parse -q --verify "refs/tags/v$v" >/dev/null && exit 0
+git tag -a "v$v" -m "Album Picker v$v" && echo "post-commit: tagged v$v"

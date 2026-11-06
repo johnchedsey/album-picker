@@ -18,6 +18,11 @@ import time
 from datetime import datetime
 
 from envfile import WEBHOOK_KEY, get_env
+from version import __version__
+
+if "--version" in sys.argv[1:]:
+    print(f"Album Picker v{__version__}")
+    sys.exit(0)
 
 # --- Config ---
 CSV_PATH = "albums.csv"  # path to your CSV file

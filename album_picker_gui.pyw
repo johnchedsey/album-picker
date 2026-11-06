@@ -33,6 +33,7 @@ from tkinter import filedialog, font, messagebox, ttk
 
 from audiolength import AUDIO_EXTS, album_length, format_length
 from envfile import WEBHOOK_KEY, get_env, set_env
+from version import __version__
 
 APP_DIR = (
     Path(sys.executable).parent if getattr(sys, "frozen", False)
@@ -588,6 +589,7 @@ class SettingsDialog(tk.Toplevel):
         btns = ttk.Frame(frm)
         btns.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(px(10), 0))
         ttk.Button(btns, text="Rebuild queue…", command=self.on_rebuild).pack(side="left")
+        ttk.Label(btns, text=f"v{__version__}", foreground="gray").pack(side="left", padx=px(10))
         ttk.Button(btns, text="Save", command=self.on_save).pack(side="right", padx=px(4))
         ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="right")
 
@@ -1025,7 +1027,7 @@ class App:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.config = load_config()
-        root.title("Album Picker")
+        root.title(f"Album Picker v{__version__}")
         root.minsize(px(480), px(480))
         self.restore_window_size()
         root.protocol("WM_DELETE_WINDOW", self.on_close)
