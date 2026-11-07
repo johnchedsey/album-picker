@@ -46,7 +46,7 @@ python album_picker_gui.pyw
 The first time it runs, the Settings window opens so you can choose your incoming folder (the app calls it "Music library folder"), where to keep the queue CSV, and whether to post to Discord.
 
 - **🎲 Random Pick!:** picks an album, removes it from the queue, and posts it to Discord if that's turned on.
-- **🔍 Manually pick:** search the queue by artist folder name and choose the next album yourself (Select, or double-click). It's handled like a random pick.
+- **🔍 Manual Selection:** choose the next album yourself. "Search for album" searches the queue by artist folder name; the shortlists offer the 10 oldest or newest albums by Date Added, or the 10 smallest or biggest folders. Pick one with Select or a double-click. It's handled like a random pick.
 - **🔄 Refresh Library:** finds albums added since the last scan and offers to queue them. It also offers to drop queued albums whose folders are gone. Albums you've already played don't come back.
 - **Recent picks:** your latest picks, read from `played.csv`.
 

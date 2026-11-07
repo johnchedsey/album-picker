@@ -564,11 +564,11 @@ class SettingsDialog(tk.Toplevel):
         self.artist_note = ttk.Label(favor, foreground="gray", wraplength=px(540), justify="left")
         self.artist_note.pack(anchor="w", pady=(0, px(2)))
         self.weight_count_check = ttk.Checkbutton(
-            favor, text="Favor artists with more queued albums (in proportion)",
+            favor, text="Artists with more albums selected much more frequently (strong mode)",
             variable=self.weight_count, command=self.update_artist_options)
         self.weight_count_check.pack(anchor="w", pady=px(2))
         self.weight_sqrt_check = ttk.Checkbutton(
-            favor, text="Favor artists with more queued albums, gently (square root)",
+            favor, text="Artists with more albums selected somewhat more frequently (gentle mode)",
             variable=self.weight_sqrt, command=self.update_artist_options)
         self.weight_sqrt_check.pack(anchor="w", pady=px(2))
         self.weight_note = ttk.Label(favor, foreground="gray")
@@ -623,7 +623,7 @@ class SettingsDialog(tk.Toplevel):
         self.favor_wait_check.state(["!disabled"] if artist_mode else ["disabled"])
         self.artist_note["text"] = ("With nothing ticked, every artist has the same chance." if artist_mode
                                     else "These only apply to the random-artist mode.")
-        self.weight_note["text"] = ("The two “more queued albums” options can't be combined; untick one to use the other."
+        self.weight_note["text"] = ("Strong and gentle mode can't be combined; untick one to use the other."
                                     if artist_mode and (self.weight_count.get() or self.weight_sqrt.get()) else "")
         self.skip_spin.state(["!disabled"] if self.skip_recent.get() else ["disabled"])
 
@@ -939,7 +939,7 @@ class ManualPickDialog(PickListMixin, tk.Toplevel):
 
     def __init__(self, parent: tk.Tk, queue: list[list[str]]):
         super().__init__(parent)
-        self.title("Manually pick")
+        self.title("Search for album")
         self.transient(parent)
         self.geometry(f"{px(640)}x{px(460)}")
         self.queue = queue
@@ -1079,19 +1079,21 @@ class App:
         btns.pack(fill="x", pady=px(12))
         self.pick_btn = ttk.Button(btns, text="🎲  Random Pick!", command=self.pick)
         self.pick_btn.pack(side="left", ipadx=px(8), ipady=px(6))
-        ttk.Button(btns, text="🔍  Manually pick", command=self.manual_pick).pack(
-            side="left", padx=(px(8), 0), ipadx=px(8), ipady=px(6))
-        self.update_btn = ttk.Button(btns, text="🔄  Refresh Library", command=self.update_from_library)
-        self.update_btn.pack(side="left", padx=px(8), ipadx=px(8), ipady=px(6))
-        self.scan_cancel = None  # threading.Event while a library scan is running
-        self.shortlist_btn = ttk.Menubutton(btns, text="📋  Shortlists")
-        self.shortlist_btn.pack(side="left", ipadx=px(8), ipady=px(6))
-        menu = tk.Menu(self.shortlist_btn, tearoff=False)
+        # Manual Selection: search the queue, or choose from one of the shortlists.
+        self.manual_btn = ttk.Menubutton(btns, text="🔍  Manual Selection")
+        self.manual_btn.pack(side="left", padx=(px(8), 0), ipadx=px(8), ipady=px(6))
+        menu = tk.Menu(self.manual_btn, tearoff=False)
+        menu.add_command(label="Search for album", command=self.manual_pick)
+        menu.add_separator()
         for label, kind in (("10 oldest Date Added", "oldest"), ("10 newest Date Added", "newest"),
                             ("10 smallest folders", "smallest"), ("10 biggest folders", "biggest")):
             menu.add_command(label=label, command=lambda k=kind: self.shortlist_pick(k))
-        self.shortlist_btn["menu"] = menu
+        self.manual_btn["menu"] = menu
         ttk.Button(btns, text="⚙  Settings", command=self.open_settings).pack(side="right", ipady=px(6))
+        # Right-hand buttons pack right to left: Settings, then Refresh Library, then Undo pick.
+        self.update_btn = ttk.Button(btns, text="🔄  Refresh Library", command=self.update_from_library)
+        self.update_btn.pack(side="right", padx=(0, px(8)), ipadx=px(8), ipady=px(6))
+        self.scan_cancel = None  # threading.Event while a library scan is running
         # Small, and kept away from Random Pick: puts the last pick back in the queue.
         self.undo_btn = ttk.Button(btns, text="↶ Undo pick", command=self.undo_pick)
         self.undo_btn.pack(side="right", padx=(0, px(8)))
@@ -1326,9 +1328,9 @@ class App:
         self.commit_pick(queue, index)
 
     def manual_pick(self) -> None:
-        queue = self.read_queue_for_pick("Manually pick")
+        queue = self.read_queue_for_pick("Search for album")
         if queue:
-            self.pick_chosen("Manually pick", ManualPickDialog(self.root, queue))
+            self.pick_chosen("Search for album", ManualPickDialog(self.root, queue))
 
     def shortlist_pick(self, kind: str) -> None:
         """Offer the 10 oldest/newest queued albums by Date Added, or the 10 smallest/biggest folders."""
@@ -1347,7 +1349,7 @@ class App:
         if not library.is_dir():
             messagebox.showerror(title, "Music library folder not found. Check Settings.")
             return
-        self.shortlist_btn.state(["disabled"])
+        self.manual_btn.state(["disabled"])
         self.set_status(f"Measuring {len(queue)} album folders ...")
 
         def worker():
@@ -1360,7 +1362,7 @@ class App:
             self.root.after(0, finish, sized)
 
         def finish(sized):
-            self.shortlist_btn.state(["!disabled"])
+            self.manual_btn.state(["!disabled"])
             self.set_status(f"Measured {len(sized)} album folders.")
             if not sized:
                 messagebox.showerror(title, "None of the queued album folders could be read.")
