@@ -30,8 +30,9 @@ WEBHOOK_URL = get_env(WEBHOOK_KEY)  # from .env next to this script, or the envi
 MAX_RETRIES = 5
 # "album": any queued album, all equally likely.
 # "artist": a random artist (each equally likely), then their oldest queued album by Created_Date.
+# "artist_newest": the same, but their newest queued album.
 PICK_MODE = "album"
-# Options as in the GUI's Settings → "Random pick mode". "artist" mode only:
+# Options as in the GUI's Settings → "Random pick mode". "artist"/"artist_newest" modes only:
 ARTIST_WEIGHT = "equal"     # "equal", "count" (by number of queued albums) or "sqrt" (gentler)
 ARTIST_FAVOR_WAIT = False  # favor artists whose oldest queued album has waited longest
 # Both modes:
@@ -78,8 +79,9 @@ def random_album(rows, skip=frozenset()):
     return random.choice(pool)
 
 
-def random_artist_oldest(rows, weight="equal", favor_wait=False, skip=frozenset()):
-    """Index of the oldest album (by Created_Date) of a random artist; ties broken at random.
+def random_artist_album(rows, weight="equal", favor_wait=False, skip=frozenset(), newest=False):
+    """Index of the oldest (or, with newest, the newest) album by Created_Date of a random
+    artist; ties broken at random.
 
     weight: "equal" (every artist the same), "count" (in proportion to queued albums) or
     "sqrt" (square root of queued albums). favor_wait multiplies that by the days the
@@ -103,12 +105,12 @@ def random_artist_oldest(rows, weight="equal", favor_wait=False, skip=frozenset(
                 pass  # unreadable date: leave the weight as it is
         weights.append(w)
     mine = groups[random.choices(pool, weights)[0]]
-    oldest = min(rows[i][2] for i in mine)  # DATE_FMT sorts correctly as text
-    return random.choice([i for i in mine if rows[i][2] == oldest])
+    target = (max if newest else min)(rows[i][2] for i in mine)  # DATE_FMT sorts correctly as text
+    return random.choice([i for i in mine if rows[i][2] == target])
 
 
-if PICK_MODE not in ("album", "artist"):
-    print(f'Error: PICK_MODE must be "album" or "artist", not {PICK_MODE!r}.')
+if PICK_MODE not in ("album", "artist", "artist_newest"):
+    print(f'Error: PICK_MODE must be "album", "artist" or "artist_newest", not {PICK_MODE!r}.')
     sys.exit(1)
 if ARTIST_WEIGHT not in ("equal", "count", "sqrt"):
     print(f'Error: ARTIST_WEIGHT must be "equal", "count" or "sqrt", not {ARTIST_WEIGHT!r}.')
@@ -118,8 +120,8 @@ history_file = os.path.join(os.path.dirname(CSV_PATH), "played.csv")
 if ARTIST_SKIP_RECENT > 0 and os.path.exists(history_file):
     with open(history_file, newline='', encoding='utf-8-sig') as f:
         skip = recent_artists(list(csv.reader(f))[1:], ARTIST_SKIP_RECENT)
-if PICK_MODE == "artist":
-    idx = random_artist_oldest(data, ARTIST_WEIGHT, ARTIST_FAVOR_WAIT, skip)
+if PICK_MODE in ("artist", "artist_newest"):
+    idx = random_artist_album(data, ARTIST_WEIGHT, ARTIST_FAVOR_WAIT, skip, newest=PICK_MODE == "artist_newest")
 else:
     idx = random_album(data, skip)
 picked = data.pop(idx)

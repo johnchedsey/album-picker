@@ -11,4 +11,4 @@ Bump it in every commit that changes the app; the git hooks in .githooks/
 enforce that and tag each new version as vX.Y.Z.
 """
 
-__version__ = "0.5.1"
+__version__ = "0.6.0"
