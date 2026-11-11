@@ -1,5 +1,7 @@
 # Secrets
 .env
+# Claude Code saves approved commands here verbatim (can include secrets)
+.claude/settings.local.json
 
 # Personal data / local settings
 album_picker_config.json
