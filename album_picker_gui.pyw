@@ -1097,17 +1097,17 @@ class App:
                             ("10 smallest folders", "smallest"), ("10 biggest folders", "biggest")):
             menu.add_command(label=label, command=lambda k=kind: self.shortlist_pick(k))
         self.manual_btn["menu"] = menu
-        ttk.Button(btns, text="⚙  Settings", command=self.open_settings).pack(side="right", ipady=px(6))
-        # Right-hand buttons pack right to left: Settings, then Refresh Library, then Undo pick.
-        self.update_btn = ttk.Button(btns, text="🔄  Refresh Library", command=self.update_from_library)
-        self.update_btn.pack(side="right", padx=(0, px(8)), ipadx=px(8), ipady=px(6))
-        self.scan_cancel = None  # threading.Event while a library scan is running
-        # Small, and kept away from Random Pick: puts the last pick back in the queue.
+        # Small, just right of Manual Selection: puts the last pick back in the queue.
         self.undo_btn = ttk.Button(btns, text="↶ Undo pick", command=self.undo_pick)
-        self.undo_btn.pack(side="right", padx=(0, px(8)))
+        self.undo_btn.pack(side="left", padx=(px(8), 0))
         self.undo_btn.state(["disabled"])
         # (queue index, queue row, played.csv row, card state before it) of the pick Undo would revert
         self.last_pick = None
+        ttk.Button(btns, text="⚙  Settings", command=self.open_settings).pack(side="right", ipady=px(6))
+        # Right-hand buttons pack right to left: Settings, then Refresh Library.
+        self.update_btn = ttk.Button(btns, text="🔄  Refresh Library", command=self.update_from_library)
+        self.update_btn.pack(side="right", padx=(0, px(8)), ipadx=px(8), ipady=px(6))
+        self.scan_cancel = None  # threading.Event while a library scan is running
 
         # Queue count, then the queue CSV's file name as a link: click opens it with the
         # default program, right-click offers "Open with…" and "Show in folder".
