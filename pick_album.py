@@ -135,9 +135,18 @@ def display_artist(name):
     return name
 
 
-def display_album(name):
-    """Folder name -> Discord name: drop "[FLAC]" / "{WEB - FLAC}" tags ("Abbey Road [FLAC]" -> "Abbey Road")."""
-    return re.sub(r"\s{2,}", " ", re.sub(r"\[flac\]|\{web\s*-\s*flac\}", "", name, flags=re.IGNORECASE)).strip() or name
+def display_album(name, artist=None):
+    """Folder name -> Discord name: drop "[FLAC]" / "{WEB - FLAC}" tags ("Abbey Road [FLAC]" -> "Abbey Road"),
+    and a leading "<Artist> - " that repeats the artist folder ("Yashira - Fail to Be (2020)" -> "Fail to Be (2020)").
+    The artist prefix is only dropped when a separator (-, –, —, :) follows it, so a self-titled
+    "Yashira (2020)" is kept as-is."""
+    name = re.sub(r"\s{2,}", " ", re.sub(r"\[flac\]|\{web\s*-\s*flac\}", "", name, flags=re.IGNORECASE)).strip() or name
+    if artist:
+        for prefix in {artist, display_artist(artist)}:
+            m = re.match(re.escape(prefix) + r"(?:\s*[-–—:]\s+|\s+[-–—]\s*)(.+)$", name, flags=re.IGNORECASE)
+            if m and m.group(1).strip():
+                return m.group(1).strip()
+    return name
 
 
 # --- Calculate time since added ---
@@ -179,7 +188,7 @@ with open(CSV_PATH, 'w', newline='', encoding='utf-8') as f:
 print(f"{len(data)} albums remaining in queue.")
 
 # --- Post to Discord (with retry on 429) ---
-message = f"💿 Up Next: **{display_artist(artist)}** — *{display_album(album)}*"
+message = f"💿 Up Next: **{display_artist(artist)}** — *{display_album(album, artist)}*"
 payload = json.dumps({"content": message}).encode("utf-8")
 
 for attempt in range(1, MAX_RETRIES + 1):
