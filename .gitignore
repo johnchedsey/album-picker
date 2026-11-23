@@ -8,6 +8,7 @@ album_picker_config.json
 albums.csv
 played.csv
 *.tmp
+.vscode/
 
 # Python / build output
 __pycache__/
