@@ -41,7 +41,7 @@ APP_DIR = (
 )
 CONFIG_PATH = APP_DIR / "album_picker_config.json"
 QUEUE_HEADER = ["First_Level_Directory", "Second_Level_Directory", "Created_Date"]
-HISTORY_HEADER = ["Artist", "Album", "Created_Date", "Picked_Date", "Status"]
+HISTORY_HEADER = ["Artist", "Album", "Created_Date", "Picked_Date", "Status", "Length"]
 DATE_FMT = "%Y-%m-%d %H:%M:%S"  # stored in the CSVs; pick_album.py parses this exact format
 MAX_RETRIES = 5
 RECENT_COUNT = 25  # default number of Recent picks shown; 0 shows them all
@@ -145,6 +145,9 @@ def write_queue(path: Path, rows: list[list[str]]) -> None:
 
 def append_history(path: Path, rows: list[list[str]]) -> None:
     new_file = not path.exists()
+    if not new_file:
+        upgrade_history_header(path)
+    rows = [r + [""] * (len(HISTORY_HEADER) - len(r)) for r in rows]
     with path.open("a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f, quoting=csv.QUOTE_ALL)
         if new_file:
@@ -152,21 +155,49 @@ def append_history(path: Path, rows: list[list[str]]) -> None:
         writer.writerows(rows)
 
 
-def remove_history_row(path: Path, row: list[str]) -> None:
-    """Drop the last history line equal to row (used by Undo pick)."""
-    rows = read_rows(path)
-    for i in range(len(rows) - 1, -1, -1):
-        if rows[i] == row:
-            del rows[i]
-            break
-    else:
-        return
+def upgrade_history_header(path: Path) -> None:
+    """Rewrite an older played.csv (no Length column) with the current header; old rows keep their fields."""
+    with path.open(newline="", encoding="utf-8-sig") as f:
+        header = next(csv.reader(f), None)
+    if header is not None and len(header) < len(HISTORY_HEADER):
+        write_history(path, read_rows(path))
+
+
+def write_history(path: Path, rows: list[list[str]]) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     with tmp.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f, quoting=csv.QUOTE_ALL)
         writer.writerow(HISTORY_HEADER)
         writer.writerows(rows)
     tmp.replace(path)
+
+
+def find_history_row(rows: list[list[str]], row: list[str]) -> int | None:
+    """Index of the last history line matching row on its first five fields (the Length may differ)."""
+    for i in range(len(rows) - 1, -1, -1):
+        if rows[i][:5] == row[:5]:
+            return i
+    return None
+
+
+def set_history_length(path: Path, row: list[str], length: str) -> None:
+    """Fill in the Length of a logged pick once it has been totalled."""
+    rows = read_rows(path)
+    i = find_history_row(rows, row)
+    if i is None:
+        return  # undone meanwhile
+    rows[i] = rows[i][:5] + [length]
+    write_history(path, rows)
+
+
+def remove_history_row(path: Path, row: list[str]) -> None:
+    """Drop the last history line for row (used by Undo pick)."""
+    rows = read_rows(path)
+    i = find_history_row(rows, row)
+    if i is None:
+        return
+    del rows[i]
+    write_history(path, rows)
 
 
 def album_key(row: list[str]) -> tuple[str, str]:
@@ -276,6 +307,13 @@ def format_size(size: int) -> str:
 def short_time(date_str: str) -> str:
     """Display form of a stored timestamp: drop the seconds (YYYY-MM-DD HH:MM)."""
     return date_str[:16]
+
+
+def hms(seconds: float) -> str:
+    """Seconds -> "hh:mm:ss" (always with hours), as logged in played.csv's Length column."""
+    minutes, secs = divmod(round(seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours:02}:{minutes:02}:{secs:02}"
 
 
 def recent_artists(history: list[list[str]], count: int) -> set[str]:
@@ -1137,10 +1175,12 @@ class App:
         # Recent picks
         recent = ttk.LabelFrame(frm, text="Recent picks", padding=px(6))
         recent.pack(fill="both", expand=True, pady=(px(8), 0))
-        self.tree = ttk.Treeview(recent, columns=("date", "artist", "album", "added"), show="headings", height=8)
+        self.tree = ttk.Treeview(recent, columns=("date", "artist", "album", "length", "added"),
+                                 show="headings", height=8)
         saved_widths = self.config.get("recent_columns") or {}
         for col, label, width in (("date", "Selected On", 130), ("artist", "Artist", 170),
-                                  ("album", "Album", 230), ("added", "Date Added", 110)):
+                                  ("album", "Album", 230), ("length", "Length", 80),
+                                  ("added", "Date Added", 110)):
             self.tree.heading(col, text=label)
             saved = saved_widths.get(col)
             width = saved if isinstance(saved, int) and saved >= px(30) else px(width)
@@ -1235,8 +1275,10 @@ class App:
         played = [h for h in history if len(h) >= 5 and h[4] == "played"]
         count = self.config.get("recent_count", RECENT_COUNT)
         recent = reversed(played[-count:] if count > 0 else played)
-        for i, (artist, album, created, picked, _status) in enumerate(recent):
-            self.tree.insert("", "end", values=(short_time(picked), artist, album, created[:10]),
+        for i, row in enumerate(recent):
+            artist, album, created, picked = row[:4]
+            length = row[5] if len(row) > 5 else ""  # picks logged before v0.7.0 have no Length
+            self.tree.insert("", "end", values=(short_time(picked), artist, album, length, created[:10]),
                              tags=("odd",) if i % 2 else ())
 
     def select_recent(self, index: int) -> str:
@@ -1269,7 +1311,7 @@ class App:
         if not selection or not url:
             return
         # str(): Tk hands back number-like values (e.g. an album called "1999") as ints
-        _picked, artist, album, _added = map(str, self.tree.item(selection[0], "values"))
+        _picked, artist, album = map(str, self.tree.item(selection[0], "values")[:3])
         name = f"{display_artist(artist)} — {album}"
         if not messagebox.askyesno("Post to Discord", f"Post {name} to Discord?"):
             return
@@ -1399,7 +1441,8 @@ class App:
         """Remove queue[index] from the saved queue, log it, and show it with a Post To Discord button."""
         row = queue.pop(index)
         artist, album, created = row[:3]
-        logged = [artist, album, created, datetime.now().strftime(DATE_FMT), "played"]
+        # Length is filled in by show_length() once the tracks are totalled (off the UI thread).
+        logged = [artist, album, created, datetime.now().strftime(DATE_FMT), "played", ""]
         try:
             write_queue(self.csv_path, queue)
             append_history(self.history_path, [logged])
@@ -1411,15 +1454,18 @@ class App:
         self.last_pick = (index, row, logged, previous)
         self.undo_btn.state(["!disabled"])
 
-        self.show_pick(artist, album, created)
+        self.show_pick(artist, album, created, log_row=logged)
         self.refresh()
         self.set_status(f"Picked {display_artist(artist)} — {album}.")
         if self.config.get("auto_post") and self.config["webhook_url"]:
             self.post_current()
 
     def show_pick(self, artist: str, album: str, created: str,
-                  posted: bool = False, failed: bool = False) -> None:
-        """Show an album on the Up next card, with its Post To Discord button in the given state."""
+                  posted: bool = False, failed: bool = False, log_row: list[str] | None = None) -> None:
+        """Show an album on the Up next card, with its Post To Discord button in the given state.
+
+        log_row: the played.csv row of a pick just made, whose Length is filled in once totalled.
+        """
         self.shown = (artist, album, created)
         self.artist_var.set(display_artist(artist))
         self.album_var.set(album)
@@ -1428,7 +1474,7 @@ class App:
         except ValueError:
             self.added_var.set(f"Added {short_time(created)}")
         self.show_cover(artist, album)
-        self.show_length(artist, album)
+        self.show_length(artist, album, log_row)
 
         self.post_message = discord_message(artist, album)
         self.post_request += 1  # ignore results of a post still running for the previous pick
@@ -1560,14 +1606,18 @@ class App:
         self.cover_label.configure(image=self.cover_image)
         self.cover_size_var.set(f"{size[0]}x{size[1]}")
 
-    def show_length(self, artist: str, album: str) -> None:
-        """Total up the album's track lengths (read from file headers) off the UI thread."""
+    def show_length(self, artist: str, album: str, log_row: list[str] | None = None) -> None:
+        """Total up the album's track lengths (read from file headers) off the UI thread.
+
+        With log_row, the total is also written to that pick's Length in played.csv.
+        """
         self.length_request += 1
         request = self.length_request
         if not self.config["library_dir"]:
             self.length_var.set("")
             return
         album_dir = Path(self.config["library_dir"]) / artist / album
+        history = self.history_path
         self.length_var.set("Length: …")
 
         def worker():
@@ -1578,11 +1628,20 @@ class App:
                     text += f" ({failed} unreadable)"
             else:
                 text = "Length: unknown" + (f" ({failed} unreadable tracks)" if failed else "")
-            self.root.after(0, self.set_length, request, text)
+            self.root.after(0, self.set_length, request, text,
+                            log_row, history, hms(seconds) if tracks else "")
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def set_length(self, request: int, text: str) -> None:
+    def set_length(self, request: int, text: str, log_row: list[str] | None = None,
+                   history: Path | None = None, length: str = "") -> None:
+        # Log the length even if a newer pick is shown by now; it still belongs to that pick.
+        if log_row and history and length:
+            try:
+                set_history_length(history, log_row, length)
+                self.refresh()
+            except (OSError, csv.Error):
+                pass  # the pick stays logged, just without a length
         if request == self.length_request:  # ignore results for an earlier pick
             self.length_var.set(text)
 
