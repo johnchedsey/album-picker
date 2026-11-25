@@ -45,7 +45,8 @@ HISTORY_HEADER = ["Artist", "Album", "Created_Date", "Picked_Date", "Status", "L
 DATE_FMT = "%Y-%m-%d %H:%M:%S"  # stored in the CSVs; pick_album.py parses this exact format
 MAX_RETRIES = 5
 RECENT_COUNT = 25  # default number of Recent picks shown; 0 shows them all
-# <Artist>/<Album> folders never scanned (may hold incomplete downloads); lower-case, same list as albumfinder.py
+# <Artist>/<Album> folders never scanned (may hold incomplete downloads); lower-case, same list as albumfinder.py.
+# Also matched one level up, as <library root>/<Artist>, when the library root itself is e.g. .../Incoming.
 EXCLUDED_ALBUMS = {("incoming", "complete"), ("incoming", "downloading")}
 
 # Ratio of the screen's DPI to the classic 96 DPI; set in main() once Tk is up.
@@ -233,8 +234,11 @@ def scan_library(root: Path, cancel: threading.Event | None = None) -> tuple[lis
     """Return (albums found, names of artist folders that couldn't be read)."""
     results = []
     unreadable = set()
+    root_name = Path(os.path.abspath(root)).name.lower()
     for artist in sorted((d for d in root.iterdir() if d.is_dir()), key=lambda d: d.name.lower()):
         check_cancel(cancel)
+        if (root_name, artist.name.lower()) in EXCLUDED_ALBUMS:
+            continue  # library root is the excluded folders' parent, e.g. M:/Incoming
         try:
             albums = sorted((d for d in artist.iterdir() if d.is_dir()), key=lambda d: d.name.lower())
         except OSError:

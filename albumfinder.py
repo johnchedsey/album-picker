@@ -4,11 +4,13 @@ Usage: python albumfinder.py [start_path] [output_file]
 """
 
 import csv
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
 
-# <Artist>/<Album> folders never scanned (may hold incomplete downloads); lower-case, same list as album_picker_gui.pyw
+# <Artist>/<Album> folders never scanned (may hold incomplete downloads); lower-case, same list as album_picker_gui.pyw.
+# Also matched one level up, as <start_path>/<Artist>, when start_path itself is e.g. .../Incoming.
 EXCLUDED_ALBUMS = {("incoming", "complete"), ("incoming", "downloading")}
 
 def scan_directories(start_path: Path, output_file: Path) -> None:
@@ -25,8 +27,12 @@ def scan_directories(start_path: Path, output_file: Path) -> None:
         return
 
     results = []
+    root_name = Path(os.path.abspath(start_path)).name.lower()
 
     for first_dir in first_level:
+        if (root_name, first_dir.name.lower()) in EXCLUDED_ALBUMS:
+            print(f"Excluded: {first_dir.name}")
+            continue
         print(f"Processing: {first_dir.name}")
 
         try:
