@@ -64,6 +64,7 @@ DEFAULT_CONFIG = {
     "webhook_url": "",
     "post_to_discord": True,
     "auto_post": False,  # post each pick to Discord as soon as it is made
+    "replay_enabled": False,  # show the Replay button (a random album from played.csv)
     "recent_count": RECENT_COUNT,
     # Random Pick! mode: "album" (any queued album), "artist" (random artist, then their oldest album)
     # or "artist_newest" (random artist, then their newest album)
@@ -552,6 +553,7 @@ class SettingsDialog(tk.Toplevel):
         self.post = tk.BooleanVar(value=config["post_to_discord"])
         self.auto_post = tk.BooleanVar(value=config.get("auto_post", False))
         self.recent_count = tk.StringVar(value=str(config.get("recent_count", RECENT_COUNT)))
+        self.replay = tk.BooleanVar(value=config.get("replay_enabled", False))
         self.history = tk.StringVar()
         self.csv_path.trace_add("write", lambda *_: self.update_history_path())
         self.update_history_path()
@@ -596,6 +598,10 @@ class SettingsDialog(tk.Toplevel):
         self.auto_post.trace_add("write", lambda *_: self.update_discord_options())
         self.update_discord_options()
 
+        ttk.Checkbutton(frm, text="Show “Replay” button (a random album you've already played, "
+                                  "without changing the queue or the log)",
+                        variable=self.replay).grid(row=7, column=1, sticky="w", pady=px(4), padx=px(6))
+
         # Random Pick! options. In "album" mode the artist weightings don't apply and are greyed out.
         # The two album-count weightings contradict each other, so ticking one greys out the other;
         # the wait option combines with either, and skip-recent works in both modes.
@@ -608,7 +614,7 @@ class SettingsDialog(tk.Toplevel):
         self.skip_recent = tk.BooleanVar(value=config.get("artist_skip_recent", False))
         self.skip_count = tk.StringVar(value=str(config.get("artist_skip_count", 10)))
         artist = ttk.LabelFrame(frm, text="Random pick mode", padding=px(8))
-        artist.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(px(10), 0))
+        artist.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(px(10), 0))
         ttk.Radiobutton(artist, text="Any album at random (every queued album has the same chance)",
                         variable=self.pick_mode, value="album",
                         command=self.update_artist_options).pack(anchor="w", pady=px(2))
@@ -646,7 +652,7 @@ class SettingsDialog(tk.Toplevel):
         self.update_artist_options()
 
         btns = ttk.Frame(frm)
-        btns.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(px(10), 0))
+        btns.grid(row=9, column=0, columnspan=3, sticky="ew", pady=(px(10), 0))
         ttk.Button(btns, text="Rebuild queue…", command=self.on_rebuild).pack(side="left")
         ttk.Label(btns, text=f"v{__version__}", foreground="gray").pack(side="left", padx=px(10))
         ttk.Button(btns, text="Save", command=self.on_save).pack(side="right", padx=px(4))
@@ -735,6 +741,7 @@ class SettingsDialog(tk.Toplevel):
             "webhook_url": self.webhook.get().strip(),
             "post_to_discord": self.post.get(),
             "auto_post": self.auto_post.get(),
+            "replay_enabled": self.replay.get(),
             "recent_count": recent_count,
             "pick_mode": self.pick_mode.get(),
             "artist_weight": "count" if self.weight_count.get() else "sqrt" if self.weight_sqrt.get() else "equal",
@@ -1131,13 +1138,15 @@ class App:
         self.post_request = 0
         self.post_failed = False  # a post of the current pick has failed
         self.posted = False  # the current pick has been posted
-        self.shown = None  # (artist, album, created) on the Up next card
+        self.shown = None  # (artist, album, created, replayed) on the Up next card; see show_pick()
 
         # Buttons
         btns = ttk.Frame(frm)
         btns.pack(fill="x", pady=px(12))
         self.pick_btn = ttk.Button(btns, text="🎲  Random Pick!", command=self.pick)
         self.pick_btn.pack(side="left", ipadx=px(8), ipady=px(6))
+        # Replay (if on in Settings): a random album from played.csv; packed before Manual Selection.
+        self.replay_btn = ttk.Button(btns, text="🔁  Replay", command=self.replay)
         # Manual Selection: search the queue, or choose from one of the shortlists.
         self.manual_btn = ttk.Menubutton(btns, text="🔍  Manual Selection")
         self.manual_btn.pack(side="left", padx=(px(8), 0), ipadx=px(8), ipady=px(6))
@@ -1148,6 +1157,7 @@ class App:
                             ("10 smallest folders", "smallest"), ("10 biggest folders", "biggest")):
             menu.add_command(label=label, command=lambda k=kind: self.shortlist_pick(k))
         self.manual_btn["menu"] = menu
+        self.update_replay_button()
         # Small, just right of Manual Selection: puts the last pick back in the queue.
         self.undo_btn = ttk.Button(btns, text="↶ Undo pick", command=self.undo_pick)
         self.undo_btn.pack(side="left", padx=(px(8), 0))
@@ -1337,6 +1347,7 @@ class App:
             save_config(self.config)
             self.refresh()
             self.update_post_button()
+            self.update_replay_button()
             self.set_status("Settings saved.")
             if dlg.rebuild:
                 self.rebuild_queue()
@@ -1362,6 +1373,37 @@ class App:
         else:
             index = random_album(queue, skip)
         self.commit_pick(queue, index)
+
+    def update_replay_button(self) -> None:
+        """Show the Replay button (just right of Random Pick!) only when it is turned on in Settings."""
+        if self.config.get("replay_enabled"):
+            self.replay_btn.pack(side="left", padx=(px(8), 0), ipadx=px(8), ipady=px(6), before=self.manual_btn)
+        else:
+            self.replay_btn.pack_forget()
+
+    def replay(self) -> None:
+        """Replay: show a random album from played.csv, every played album equally likely.
+
+        Read-only: the queue, played.csv, Recent picks and Undo pick are all left alone.
+        It can be posted to Discord like any pick.
+        """
+        try:
+            history = read_rows(self.history_path)
+        except (OSError, csv.Error) as e:
+            messagebox.showerror("Replay", f"Could not read {self.history_path}:\n{e}")
+            return
+        played: dict[tuple[str, str], list[str]] = {}
+        for row in history:
+            if len(row) >= 5 and row[4] == "played":
+                played[album_key(row)] = row  # an album logged twice counts once (latest pick)
+        if not played:
+            messagebox.showinfo("Replay", "Nothing has been played yet.\nPick an album first.")
+            return
+        artist, album, created, picked = random.choice(list(played.values()))[:4]
+        self.show_pick(artist, album, created, replayed=picked)
+        self.set_status(f"Replay: {display_artist(artist)} — {album}.")
+        if self.config.get("auto_post") and self.config["webhook_url"]:
+            self.post_current()
 
     def read_queue_for_pick(self, title: str) -> list[list[str]] | None:
         """The queue rows, or None (after telling the user) if it can't be read or is empty."""
@@ -1454,7 +1496,7 @@ class App:
             messagebox.showerror("Pick", f"Could not update the queue:\n{e}")
             return
         # Undo puts the previous pick back on the card, so an unposted one can still be posted.
-        previous = (*self.shown, self.posted, self.post_failed) if self.shown else None
+        previous = (self.shown, self.posted, self.post_failed) if self.shown else None
         self.last_pick = (index, row, logged, previous)
         self.undo_btn.state(["!disabled"])
 
@@ -1464,19 +1506,26 @@ class App:
         if self.config.get("auto_post") and self.config["webhook_url"]:
             self.post_current()
 
-    def show_pick(self, artist: str, album: str, created: str,
+    def show_pick(self, artist: str, album: str, created: str, replayed: str = "",
                   posted: bool = False, failed: bool = False, log_row: list[str] | None = None) -> None:
         """Show an album on the Up next card, with its Post To Discord button in the given state.
 
+        replayed: for a Replay, the Picked_Date of the played.csv row it came from.
         log_row: the played.csv row of a pick just made, whose Length is filled in once totalled.
         """
-        self.shown = (artist, album, created)
+        self.shown = (artist, album, created, replayed)
         self.artist_var.set(display_artist(artist))
         self.album_var.set(album)
         try:
-            self.added_var.set(f"Added {short_time(created)} ({time_since(created)} ago)")
+            added = f"Added {short_time(created)} ({time_since(created)} ago)"
         except ValueError:
-            self.added_var.set(f"Added {short_time(created)}")
+            added = f"Added {short_time(created)}"
+        if replayed:
+            try:
+                added = f"🔁 Replay of your pick on {short_time(replayed)} ({time_since(replayed)} ago)  •  {added}"
+            except ValueError:
+                added = f"🔁 Replay of your pick on {short_time(replayed)}  •  {added}"
+        self.added_var.set(added)
         self.show_cover(artist, album)
         self.show_length(artist, album, log_row)
 
@@ -1514,7 +1563,8 @@ class App:
         self.refresh()
         self.set_status(f"Put {name} back in the queue.")
         if previous:
-            self.show_pick(*previous)
+            shown, posted, failed = previous
+            self.show_pick(*shown, posted=posted, failed=failed)
             return
 
         self.shown = None
